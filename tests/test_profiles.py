@@ -183,8 +183,8 @@ class TestGenshinImpactProfile:
 
     def test_action_space_size(self, profile):
         assert len(profile.movements) == 8
-        assert len(profile.actions) == 9
-        assert profile.vocab_size == 72
+        assert len(profile.actions) == 10  # +aim (dynamic look)
+        assert profile.vocab_size == 80
 
     def test_state_classes(self, profile):
         assert len(profile.state_classes) == 4
@@ -214,8 +214,8 @@ class TestMiniWorldProfile:
 
     def test_action_space_size(self, profile):
         assert len(profile.movements) == 8
-        assert len(profile.actions) == 8
-        assert profile.vocab_size == 64
+        assert len(profile.actions) == 9  # +look (dynamic camera)
+        assert profile.vocab_size == 72
 
     def test_bos_token(self, profile):
         assert profile.bos_token == 0

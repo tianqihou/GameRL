@@ -161,18 +161,21 @@ class TestPPOAgent:
         image_features = np.random.randn(5, 64).astype(np.float32)
         action_history = np.array([128, 5, 10, 15, 20], dtype=np.int64)
 
-        action, log_prob, value = agent.select_action(image_features, action_history)
+        action, log_prob, value, cont_params, cont_log_prob = agent.select_action(image_features, action_history)
 
         assert 0 <= action < 131
         assert isinstance(log_prob, float)
         assert isinstance(value, float)
+        # Pure discrete game (default test policy) → no continuous params
+        assert cont_params is None
+        assert cont_log_prob == 0.0
 
     def test_select_action_manual(self, agent):
         """Test manual action override."""
         image_features = np.random.randn(3, 64).astype(np.float32)
         action_history = np.array([128, 5, 10], dtype=np.int64)
 
-        action, log_prob, value = agent.select_action(
+        action, log_prob, value, _, _ = agent.select_action(
             image_features, action_history, manual_action=42
         )
 

@@ -25,6 +25,9 @@ class Transition:
     value: float
     reward: float
     done: bool
+    # Hybrid action space (optional)
+    continuous_params: np.ndarray | None = None  # (continuous_dim,)
+    continuous_log_prob: float = 0.0
 
 
 class RolloutMemory:
@@ -54,6 +57,9 @@ class RolloutMemory:
         self.values: List[float] = []
         self.rewards: List[float] = []
         self.dones: List[bool] = []
+        # Hybrid action data
+        self.continuous_params: List[np.ndarray | None] = []
+        self.continuous_log_probs: List[float] = []
 
         # Computed during GAE
         self.advantages: Optional[np.ndarray] = None
@@ -70,6 +76,8 @@ class RolloutMemory:
         value: float,
         reward: float,
         done: bool,
+        continuous_params: np.ndarray | None = None,
+        continuous_log_prob: float = 0.0,
     ) -> None:
         """Add a transition to the buffer."""
         if len(self.actions) >= self.max_size:
@@ -80,6 +88,8 @@ class RolloutMemory:
             self.values.pop(0)
             self.rewards.pop(0)
             self.dones.pop(0)
+            self.continuous_params.pop(0)
+            self.continuous_log_probs.pop(0)
 
         self.image_features.append(image_features)
         self.actions.append(action)
@@ -87,6 +97,8 @@ class RolloutMemory:
         self.values.append(value)
         self.rewards.append(reward)
         self.dones.append(done)
+        self.continuous_params.append(continuous_params)
+        self.continuous_log_probs.append(continuous_log_prob)
 
     def compute_gae(
         self,
@@ -134,6 +146,8 @@ class RolloutMemory:
         Yields:
             Dictionary with keys: image_features, actions, old_log_probs,
             advantages, returns, values.
+            When hybrid data is present, also includes:
+            continuous_params, old_continuous_log_probs.
         """
         assert self.advantages is not None, "Must call compute_gae() first"
 
@@ -143,10 +157,13 @@ class RolloutMemory:
         # Normalize advantages
         adv_normalized = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
 
+        # Check if hybrid data is present
+        has_continuous = self.continuous_params and self.continuous_params[0] is not None
+
         for start in range(0, n, batch_size):
             batch_idx = indices[start:start + batch_size]
 
-            yield {
+            batch: Dict[str, torch.Tensor] = {
                 "image_features": torch.FloatTensor(
                     np.stack([self.image_features[i] for i in batch_idx])
                 ),
@@ -157,6 +174,16 @@ class RolloutMemory:
                 "old_values": torch.FloatTensor([self.values[i] for i in batch_idx]),
             }
 
+            if has_continuous:
+                batch["continuous_params"] = torch.FloatTensor(
+                    np.stack([self.continuous_params[i] for i in batch_idx])
+                )
+                batch["old_continuous_log_probs"] = torch.FloatTensor(
+                    [self.continuous_log_probs[i] for i in batch_idx]
+                )
+
+            yield batch
+
     def clear(self) -> None:
         """Clear all stored data."""
         self.image_features.clear()
@@ -165,6 +192,8 @@ class RolloutMemory:
         self.values.clear()
         self.rewards.clear()
         self.dones.clear()
+        self.continuous_params.clear()
+        self.continuous_log_probs.clear()
         self.advantages = None
         self.returns = None
 

@@ -82,6 +82,11 @@ class PeacekeeperEliteProfile(GameProfile):
         return (2340, 1080)
 
     @property
+    def continuous_params(self) -> List[str]:
+        """FPS needs look/aim direction (dx, dy) in [-1, 1]."""
+        return ["look_dx", "look_dy"]
+
+    @property
     def detection_classes(self) -> List[str]:
         return ["player", "enemy", "vehicle", "loot_item", "weapon", "door", "safe_zone"]
 
@@ -144,7 +149,6 @@ class PeacekeeperEliteProfile(GameProfile):
         # Right side action buttons
         button_coords = {
             "shoot": (2050, 850),
-            "aim": (1800, 650),
             "reload": (1900, 500),
             "crouch": (600, 950),
             "prone": (600, 1000),
@@ -160,6 +164,17 @@ class PeacekeeperEliteProfile(GameProfile):
                 coords=coord,
                 duration_ms=100,
             )
+
+        # Dynamic "aim" action: swipe from screen center towards (look_dx, look_dy)
+        # The policy outputs look_dx, look_dy in [-1, 1]; the swipe end point
+        # is computed at runtime as center + (dx, dy) * max_radius.
+        screen_cx, screen_cy = 1170, 540  # center of 2340x1080
+        mapping["aim"] = TouchAction(
+            type="look",
+            coords=(screen_cx, screen_cy, 400),  # center_x, center_y, max_radius
+            duration_ms=50,
+            param_keys=("look_dx", "look_dy"),
+        )
 
         return mapping
 

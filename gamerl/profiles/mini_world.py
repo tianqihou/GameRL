@@ -56,6 +56,7 @@ class MiniWorldProfile(GameProfile):
             "switch_slot_1",
             "switch_slot_2",
             "open_inventory",
+            "look",  # dynamic camera rotation (uses look_dx, look_dy)
         ]
 
     @property
@@ -69,6 +70,11 @@ class MiniWorldProfile(GameProfile):
     @property
     def idle_actions(self) -> List[str]:
         return ["noop"]
+
+    @property
+    def continuous_params(self) -> List[str]:
+        """Sandbox game needs camera look direction for building and exploring."""
+        return ["look_dx", "look_dy"]
 
     @property
     def state_classes(self) -> List[str]:
@@ -189,6 +195,15 @@ class MiniWorldProfile(GameProfile):
                 coords=coord,
                 duration_ms=duration,
             )
+
+        # Dynamic "look" action: swipe to rotate camera
+        screen_cx, screen_cy = 960, 540  # center of 1920x1080
+        mapping["look"] = TouchAction(
+            type="look",
+            coords=(screen_cx, screen_cy, 400),
+            duration_ms=50,
+            param_keys=("look_dx", "look_dy"),
+        )
 
         return mapping
 

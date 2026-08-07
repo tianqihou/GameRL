@@ -104,10 +104,12 @@ class TestTransformerPolicy:
         actions = torch.randint(0, 130, (batch_size, seq_len))
         attn_mask = create_causal_mask(seq_len, torch.device("cpu")).squeeze(0)
 
-        logits, values = small_policy(image_features, actions, attn_mask=attn_mask)
+        logits, values, cont_mean = small_policy(image_features, actions, attn_mask=attn_mask)
 
         assert logits.shape == (batch_size, seq_len, 131)
         assert values.shape == (batch_size, seq_len, 1)
+        # Pure discrete (continuous_dim=0) → no continuous output
+        assert cont_mean is None
 
     def test_get_last_step(self, small_policy):
         batch_size, seq_len = 2, 10
@@ -115,12 +117,13 @@ class TestTransformerPolicy:
         actions = torch.randint(0, 130, (batch_size, seq_len))
         attn_mask = create_causal_mask(seq_len, torch.device("cpu")).squeeze(0)
 
-        logits_last, value_last = small_policy.get_last_step(
+        logits_last, value_last, cont_last = small_policy.get_last_step(
             image_features, actions, attn_mask=attn_mask
         )
 
         assert logits_last.shape == (batch_size, 131)
         assert value_last.shape == (batch_size, 1)
+        assert cont_last is None
 
     def test_backward_pass(self, small_policy):
         """Test that gradients flow correctly."""
@@ -129,7 +132,7 @@ class TestTransformerPolicy:
         actions = torch.randint(0, 130, (batch_size, seq_len))
         attn_mask = create_causal_mask(seq_len, torch.device("cpu")).squeeze(0)
 
-        logits, values = small_policy(image_features, actions, attn_mask=attn_mask)
+        logits, values, _ = small_policy(image_features, actions, attn_mask=attn_mask)
 
         loss = logits.sum() + values.sum()
         loss.backward()

@@ -92,12 +92,22 @@ class GameEnvironment:
 
         return self._get_state(raw_image=img)
 
-    def step(self, action: int) -> Tuple[GameState, float, bool, Dict]:
+    def step(
+        self,
+        action: int,
+        continuous_params: Dict[str, float] | None = None,
+    ) -> Tuple[GameState, float, bool, Dict]:
         """
         Execute an action and return the new state.
 
+        For hybrid action spaces, *continuous_params* carries the runtime
+        values (e.g. aim direction) that dynamic touch actions (``"look"``,
+        ``"dynamic_joystick"``) consume to compute their coordinates.
+
         Args:
-            action: Action token.
+            action: Discrete action token.
+            continuous_params: Optional dict mapping param names to values
+                in [-1, 1].  Ignored for pure-discrete games.
 
         Returns:
             Tuple of (state, reward, done, info).
@@ -114,7 +124,7 @@ class GameEnvironment:
             should_move = movement not in ("无移动", "移动停", "noop")
 
         if should_move:
-            cmd = self.action_mapper.get_action_command(movement)
+            cmd = self.action_mapper.get_action_command(movement, continuous_params)
             if cmd:
                 self.device.send_touch_command(cmd)
 
@@ -126,7 +136,7 @@ class GameEnvironment:
             should_act = action_type not in ("无动作", "noop")
 
         if should_act:
-            cmd = self.action_mapper.get_action_command(action_type)
+            cmd = self.action_mapper.get_action_command(action_type, continuous_params)
             if cmd:
                 self.device.send_touch_command(cmd)
 

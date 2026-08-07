@@ -51,6 +51,7 @@ class GenshinImpactProfile(GameProfile):
             "jump",
             "switch_char",
             "interact",
+            "aim",  # dynamic look action (uses aim_dx, aim_dy)
         ]
 
     @property
@@ -64,6 +65,11 @@ class GenshinImpactProfile(GameProfile):
     @property
     def idle_actions(self) -> List[str]:
         return ["noop"]
+
+    @property
+    def continuous_params(self) -> List[str]:
+        """Genshin needs aim direction for bow aiming and burst direction."""
+        return ["aim_dx", "aim_dy"]
 
     @property
     def state_classes(self) -> List[str]:
@@ -158,6 +164,16 @@ class GenshinImpactProfile(GameProfile):
                 coords=coord,
                 duration_ms=duration,
             )
+
+        # Dynamic "aim" action: swipe from screen center towards (aim_dx, aim_dy)
+        # Used for bow aiming and burst direction control.
+        screen_cx, screen_cy = 1280, 720  # center of 2560x1440
+        mapping["aim"] = TouchAction(
+            type="look",
+            coords=(screen_cx, screen_cy, 500),  # center_x, center_y, max_radius
+            duration_ms=50,
+            param_keys=("aim_dx", "aim_dy"),
+        )
 
         return mapping
 

@@ -27,14 +27,26 @@ from ..utils.actions import ActionSpace
 
 @dataclass
 class TouchAction:
-    """A touch action definition: either a tap or a joystick move."""
+    """A touch action definition.
 
-    type: str  # "tap" | "joystick" | "swipe"
-    # For "tap": the (x, y) coordinate to tap
-    # For "joystick": center (x, y) and offset (dx, dy) for direction
-    # For "swipe": start (x1, y1) and end (x2, y2) with duration
+    Types:
+    - "tap": Fixed coordinate tap. coords = (x, y)
+    - "joystick": Fixed-direction joystick slide. coords = (start_x, start_y, end_x, end_y)
+    - "swipe": Fixed swipe gesture. coords = (x1, y1, x2, y2)
+    - "look": Dynamic swipe whose direction is set at runtime by continuous
+        parameters. coords = (center_x, center_y, max_radius).
+        param_keys = [dx_key, dy_key]; values are in [-1, 1].
+        End point = (center_x + dx * max_radius, center_y + dy * max_radius).
+    - "dynamic_joystick": Same coordinate math as "look" but executed via
+        the joystick touch protocol (pointer id 1).
+    """
+
+    type: str  # "tap" | "joystick" | "swipe" | "look" | "dynamic_joystick"
     coords: Tuple[int, ...]
     duration_ms: int = 100
+    # Names of continuous params this action consumes (only for "look" / "dynamic_joystick").
+    # Order matters: [dx_param, dy_param].
+    param_keys: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -133,6 +145,34 @@ class GameProfile(ABC):
         ...
 
     @property
+    def continuous_params(self) -> List[str]:
+        """Names of continuous parameters the policy outputs for this game.
+
+        Override in subclass to enable hybrid action space.  Each name
+        corresponds to one scalar in [-1, 1] that the policy network
+        produces alongside the discrete token.
+
+        Examples:
+        - Peacekeeper: ["look_dx", "look_dy"]  -- aim / look direction
+        - Genshin:     ["aim_dx", "aim_dy"]     -- burst / bow aim
+        - HoK:         []                        -- pure discrete (default)
+
+        TouchActions of type "look" or "dynamic_joystick" reference these
+        names via their ``param_keys`` field.
+        """
+        return []
+
+    @property
+    def num_continuous_params(self) -> int:
+        """Number of continuous parameters (0 for pure-discrete games)."""
+        return len(self.continuous_params)
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Whether this game uses a hybrid (discrete + continuous) action space."""
+        return self.num_continuous_params > 0
+
+    @property
     def detection_classes(self) -> List[str]:
         """
         Object detection class names for YOLO.
@@ -214,4 +254,6 @@ class GameProfile(ABC):
             "idle_actions": self.idle_actions,
             "reward_events": self.reward_events,
             "terminal_events": self.terminal_events,
+            "continuous_params": self.continuous_params,
+            "is_hybrid": self.is_hybrid,
         }

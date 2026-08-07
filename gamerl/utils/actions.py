@@ -19,6 +19,13 @@ from typing import Dict, List, Tuple
 import json
 from pathlib import Path
 
+import numpy as np
+
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore[assignment]
+
 
 class Movement(Enum):
     """Movement directions (joystick) - Honor of Kings specific."""
@@ -138,3 +145,93 @@ class ActionSpace:
 def default_action_space() -> ActionSpace:
     """Create the default action space for Honor of Kings."""
     return ActionSpace()
+
+
+class HybridActionSpace:
+    """
+    Hybrid action space: discrete token + continuous parameters.
+
+    Wraps a discrete :class:`ActionSpace` and augments it with an optional
+    set of continuous parameters (each a scalar in ``[-1, 1]``).  This lets
+    the policy control both *what* button to press (discrete) and *how* to
+    perform dynamic actions like aiming or camera rotation (continuous).
+
+    Games with ``continuous_params = []`` behave identically to a pure
+    :class:`ActionSpace` — the hybrid wrapper is a transparent no-op.
+
+    Args:
+        discrete: The underlying discrete action space.
+        continuous_param_names: Ordered list of continuous parameter names
+            (e.g. ``["look_dx", "look_dy"]``).  May be empty.
+    """
+
+    def __init__(
+        self,
+        discrete: ActionSpace,
+        continuous_param_names: List[str] | None = None,
+    ):
+        self.discrete = discrete
+        self.continuous_param_names: List[str] = continuous_param_names or []
+        self.continuous_dim = len(self.continuous_param_names)
+
+    # ---- delegate to discrete ----
+
+    @property
+    def vocab_size(self) -> int:
+        return self.discrete.vocab_size
+
+    @property
+    def size(self) -> int:
+        return self.discrete.size
+
+    def encode(self, movement: str, action: str) -> int:
+        return self.discrete.encode(movement, action)
+
+    def decode(self, token: int) -> Tuple[str, str]:
+        return self.discrete.decode(token)
+
+    # ---- continuous helpers ----
+
+    def is_hybrid(self) -> bool:
+        """True when continuous parameters are present."""
+        return self.continuous_dim > 0
+
+    def clamp_continuous(self, params: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
+        """Clamp continuous parameters to [-1, 1].
+
+        Works with both numpy arrays and torch tensors (preserving type).
+        """
+        if isinstance(params, torch.Tensor):
+            return params.clamp(-1.0, 1.0)
+        return np.clip(params, -1.0, 1.0)
+
+    def sample_continuous(self) -> np.ndarray:
+        """Sample continuous params uniformly from [-1, 1].
+
+        Useful for random baselines and sanity checks.
+        """
+        if self.continuous_dim == 0:
+            return np.zeros(0, dtype=np.float32)
+        return np.random.uniform(-1.0, 1.0, size=self.continuous_dim).astype(np.float32)
+
+    def params_to_dict(self, params: np.ndarray) -> Dict[str, float]:
+        """Convert a continuous param vector to a name→value dict."""
+        return {
+            name: float(params[i])
+            for i, name in enumerate(self.continuous_param_names)
+        }
+
+    def dict_to_params(self, d: Dict[str, float]) -> np.ndarray:
+        """Convert a name→value dict back to a param vector."""
+        return np.array(
+            [d.get(name, 0.0) for name in self.continuous_param_names],
+            dtype=np.float32,
+        )
+
+    @classmethod
+    def from_profile(cls, profile) -> "HybridActionSpace":
+        """Build a HybridActionSpace from a GameProfile."""
+        return cls(
+            discrete=profile.action_space,
+            continuous_param_names=profile.continuous_params,
+        )

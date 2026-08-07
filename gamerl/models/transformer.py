@@ -75,8 +75,13 @@ class TransformerPolicy(nn.Module):
     Transformer-based policy-value network for game AI.
 
     Takes image features (from backbone) and action history, and outputs:
-    - Action logits (policy head)
+    - Action logits (policy head, discrete)
     - State value estimate (value head)
+    - Continuous action mean (continuous head, optional)
+
+    When ``continuous_dim > 0`` the network also outputs a mean vector
+    for the continuous parameters.  The log-std is a learned parameter
+    (not state-dependent), following common practice in PPO implementations.
 
     Architecture:
         Image features -> Linear projection -> + RoPE -> Transformer Decoder -> Heads
@@ -89,6 +94,7 @@ class TransformerPolicy(nn.Module):
         vocab_size: Action vocabulary size.
         dropout: Dropout rate.
         max_seq_len: Maximum sequence length for RoPE.
+        continuous_dim: Number of continuous action parameters (0 for pure discrete).
     """
 
     def __init__(
@@ -100,12 +106,14 @@ class TransformerPolicy(nn.Module):
         vocab_size: int = 131,
         dropout: float = 0.0,
         max_seq_len: int = 512,
+        continuous_dim: int = 0,
     ):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
 
         self.d_model = d_model
         self.vocab_size = vocab_size
+        self.continuous_dim = continuous_dim
 
         # Project image features to transformer dimension
         self.feature_proj = nn.Linear(feature_dim, d_model)
@@ -143,6 +151,14 @@ class TransformerPolicy(nn.Module):
             nn.Linear(d_model // 2, 1),
         )
 
+        # Continuous action head (mean of Gaussian) — only when needed
+        self.continuous_head: nn.Linear | None = None
+        self.continuous_log_std: nn.Parameter | None = None
+        if continuous_dim > 0:
+            self.continuous_head = nn.Linear(d_model, continuous_dim)
+            # Learnable log-std (state-independent), initialized near 0
+            self.continuous_log_std = nn.Parameter(torch.zeros(continuous_dim))
+
         # Initialize weights
         self._init_weights()
 
@@ -165,7 +181,7 @@ class TransformerPolicy(nn.Module):
         action_seq: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass through the policy-value network.
 
@@ -177,9 +193,10 @@ class TransformerPolicy(nn.Module):
                 True values are positions to MASK OUT (PyTorch convention).
 
         Returns:
-            Tuple of (action_logits, state_values):
+            Tuple of (action_logits, state_values, continuous_mean):
             - action_logits: (batch, seq_len, vocab_size)
             - state_values: (batch, seq_len, 1)
+            - continuous_mean: (batch, seq_len, continuous_dim) or None
         """
         batch_size, seq_len, _ = image_features.shape
 
@@ -218,7 +235,14 @@ class TransformerPolicy(nn.Module):
         action_logits = self.policy_head(x)  # (B, S, vocab_size)
         state_values = self.value_head(x)    # (B, S, 1)
 
-        return action_logits, state_values
+        # Continuous action mean (optional)
+        continuous_mean = None
+        if self.continuous_head is not None:
+            continuous_mean = self.continuous_head(x)  # (B, S, continuous_dim)
+            # Tanh squashes to [-1, 1] to match the parameter range
+            continuous_mean = torch.tanh(continuous_mean)
+
+        return action_logits, state_values, continuous_mean
 
     def get_last_step(
         self,
@@ -226,7 +250,7 @@ class TransformerPolicy(nn.Module):
         action_seq: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Get policy and value for only the last timestep (for inference).
 
@@ -234,12 +258,14 @@ class TransformerPolicy(nn.Module):
         we only need the next action.
 
         Returns:
-            Tuple of (action_logits_last, value_last):
+            Tuple of (action_logits_last, value_last, continuous_mean_last):
             - action_logits_last: (batch, vocab_size)
             - value_last: (batch, 1)
+            - continuous_mean_last: (batch, continuous_dim) or None
         """
-        logits, values = self.forward(image_features, action_seq, attn_mask, key_padding_mask)
-        return logits[:, -1, :], values[:, -1, :]
+        logits, values, cont_mean = self.forward(image_features, action_seq, attn_mask, key_padding_mask)
+        cont_last = cont_mean[:, -1, :] if cont_mean is not None else None
+        return logits[:, -1, :], values[:, -1, :], cont_last
 
     @torch.no_grad()
     def count_parameters(self) -> int:

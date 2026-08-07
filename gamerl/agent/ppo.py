@@ -29,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical
+from torch.distributions import Categorical, Normal
 
 from ..config import AgentConfig
 from ..models.backbone import BackboneExtractor
@@ -98,9 +98,13 @@ class PPOAgent:
         image_features: np.ndarray | torch.Tensor,
         action_history: np.ndarray,
         manual_action: Optional[int] = None,
-    ) -> Tuple[int, float, float]:
+    ) -> Tuple[int, float, float, np.ndarray | None, float]:
         """
         Select an action using the current policy.
+
+        For hybrid action spaces, also samples continuous parameters from
+        a Gaussian distribution whose mean is predicted by the network and
+        whose std is a learned parameter.
 
         Args:
             image_features: Image features for current sequence, shape (seq_len, feature_dim).
@@ -108,7 +112,8 @@ class PPOAgent:
             manual_action: If provided, use this action instead of sampling.
 
         Returns:
-            Tuple of (action, log_prob, value).
+            Tuple of (action, log_prob, value, continuous_params, continuous_log_prob).
+            ``continuous_params`` is None for pure-discrete games.
         """
         self.policy.eval()
 
@@ -127,13 +132,13 @@ class PPOAgent:
         attn_mask = attn_mask.squeeze(0)  # (S, S)
 
         # Forward pass
-        logits, values = self.policy(image_features, action_history, attn_mask=attn_mask)
+        logits, values, cont_mean = self.policy(image_features, action_history, attn_mask=attn_mask)
 
         # Get last step
         logits_last = logits[:, -1, :]  # (1, vocab_size)
         value_last = values[:, -1, 0]   # (1,)
 
-        # Sample action
+        # Sample discrete action
         probs = F.softmax(logits_last, dim=-1)
         dist = Categorical(probs)
 
@@ -146,7 +151,22 @@ class PPOAgent:
         action_int = action.item()
         value_float = value_last.item()
 
-        return action_int, log_prob, value_float
+        # Sample continuous params (if hybrid)
+        continuous_params = None
+        continuous_log_prob = 0.0
+
+        if cont_mean is not None and self.policy.continuous_dim > 0:
+            cont_mean_last = cont_mean[:, -1, :]  # (1, continuous_dim)
+            log_std = self.policy.continuous_log_std  # (continuous_dim,)
+            std = log_std.exp()
+            cont_dist = Normal(cont_mean_last, std)
+            cont_action = cont_dist.sample()  # (1, continuous_dim)
+            continuous_log_prob = cont_dist.log_prob(cont_action).sum(dim=-1).item()
+            continuous_params = cont_action.squeeze(0).cpu().numpy()
+            # Clamp to [-1, 1] for execution
+            continuous_params = np.clip(continuous_params, -1.0, 1.0)
+
+        return action_int, log_prob, value_float, continuous_params, continuous_log_prob
 
     def store_transition(
         self,
@@ -156,9 +176,15 @@ class PPOAgent:
         value: float,
         reward: float,
         done: bool,
+        continuous_params: np.ndarray | None = None,
+        continuous_log_prob: float = 0.0,
     ) -> None:
         """Store a transition in the rollout memory."""
-        self.memory.add(image_features, action, log_prob, value, reward, done)
+        self.memory.add(
+            image_features, action, log_prob, value, reward, done,
+            continuous_params=continuous_params,
+            continuous_log_prob=continuous_log_prob,
+        )
 
     def update(self, last_value: float = 0.0) -> Dict[str, float]:
         """
@@ -205,28 +231,52 @@ class PPOAgent:
                 returns = batch["returns"].to(self.device)
                 old_values = batch["old_values"].to(self.device)
 
+                # Hybrid data (may be absent for pure-discrete games)
+                has_continuous = "continuous_params" in batch
+                if has_continuous:
+                    cont_actions = batch["continuous_params"].to(self.device)
+                    old_cont_log_probs = batch["old_continuous_log_probs"].to(self.device)
+
                 batch_size = img_feats.size(0)
 
                 # Reshape for transformer: treat each transition independently (seq_len=1)
-                # In a more sophisticated setup, we'd process sequences
                 img_feats = img_feats.unsqueeze(1)  # (B, 1, D)
                 actions_input = actions.unsqueeze(1)  # (B, 1)
 
                 # Forward pass with AMP
                 with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
-                    logits, values = self.policy(img_feats, actions_input)
+                    logits, values, cont_mean = self.policy(img_feats, actions_input)
                     logits_last = logits[:, -1, :]  # (B, vocab_size)
                     values_last = values[:, -1, 0]  # (B,)
 
-                    # New action distribution
+                    # New discrete action distribution
                     probs = F.softmax(logits_last, dim=-1)
                     dist = Categorical(probs)
 
-                    # New log probabilities
+                    # New discrete log probabilities
                     new_log_probs = dist.log_prob(actions)
 
+                    # --- Continuous action log probs (hybrid) ---
+                    if has_continuous and cont_mean is not None:
+                        cont_mean_last = cont_mean[:, -1, :]  # (B, continuous_dim)
+                        log_std = self.policy.continuous_log_std
+                        std = log_std.exp()
+                        cont_dist = Normal(cont_mean_last, std)
+                        new_cont_log_probs = cont_dist.log_prob(cont_actions).sum(dim=-1)
+
+                        # Combined log prob = discrete + continuous
+                        total_new_log_probs = new_log_probs + new_cont_log_probs
+                        total_old_log_probs = old_log_probs + old_cont_log_probs
+
+                        # Continuous entropy
+                        cont_entropy = cont_dist.entropy().sum(dim=-1).mean()
+                    else:
+                        total_new_log_probs = new_log_probs
+                        total_old_log_probs = old_log_probs
+                        cont_entropy = torch.tensor(0.0, device=self.device)
+
                     # --- PPO Clipped Surrogate Objective ---
-                    log_ratio = new_log_probs - old_log_probs
+                    log_ratio = total_new_log_probs - total_old_log_probs
                     ratio = torch.exp(log_ratio)
 
                     # Clipped ratio
@@ -248,7 +298,8 @@ class PPOAgent:
                     value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
 
                     # --- Entropy Bonus ---
-                    entropy = dist.entropy().mean()
+                    discrete_entropy = dist.entropy().mean()
+                    entropy = discrete_entropy + cont_entropy
 
                     # --- Total Loss ---
                     total_loss = (

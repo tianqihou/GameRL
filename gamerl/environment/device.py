@@ -182,6 +182,11 @@ class ActionMapper:
     Coordinates are loaded from a GameProfile's touch_mapping, making
     it game-agnostic.
 
+    Supports both **static** actions (tap / joystick / swipe with fixed
+    coordinates) and **dynamic** actions (look / dynamic_joystick whose
+    direction is determined at runtime by continuous parameters from the
+    policy network).
+
     Args:
         touch_mapping: Dict mapping action labels to TouchAction objects.
         resolution: Device screen resolution (width, height).
@@ -203,12 +208,32 @@ class ActionMapper:
             resolution=profile.resolution,
         )
 
-    def get_action_command(self, action_name: str) -> str:
+    def get_action_command(
+        self,
+        action_name: str,
+        continuous_params: Dict[str, float] | None = None,
+    ) -> str:
         """
         Get the touch command string for an action.
 
-        Returns a minitouch-format command that can be sent via
-        ADBDevice.send_touch_command().
+        For static action types (tap / joystick / swipe) the coordinates
+        are fixed at profile-definition time.
+
+        For dynamic types (look / dynamic_joystick) the coordinates are
+        computed from *continuous_params* at runtime:
+
+        * ``coords = (center_x, center_y, max_radius)``
+        * ``param_keys = [dx_key, dy_key]`` — values in [-1, 1]
+        * ``end_x = center_x + dx * max_radius``
+        * ``end_y = center_y + dy * max_radius``
+
+        Args:
+            action_name: Movement or action label.
+            continuous_params: Optional dict of param name → value.
+                Required for "look" and "dynamic_joystick" types.
+
+        Returns:
+            Minitouch-format command string (empty if action not found).
         """
         touch_action = self.touch_mapping.get(action_name)
         if touch_action is None:
@@ -227,4 +252,49 @@ class ActionMapper:
             sx, sy, ex, ey = touch_action.coords
             return f"d 0 {sx} {sy} 300\nc\nm 0 {ex} {ey} {touch_action.duration_ms}\nc\nu 0\nc\n"
 
+        elif touch_action.type == "look":
+            return self._build_dynamic_command(touch_action, continuous_params, pointer_id=0)
+
+        elif touch_action.type == "dynamic_joystick":
+            return self._build_dynamic_command(touch_action, continuous_params, pointer_id=1)
+
         return ""
+
+    def _build_dynamic_command(
+        self,
+        touch_action: "TouchAction",
+        continuous_params: Dict[str, float] | None,
+        pointer_id: int,
+    ) -> str:
+        """
+        Build a touch command for dynamic action types (look / dynamic_joystick).
+
+        The end point is computed from the continuous parameters referenced
+        by ``touch_action.param_keys``.  If params are missing or zero, the
+        action degenerates to a tap at the center point (no movement).
+        """
+        if len(touch_action.coords) < 3:
+            return ""
+
+        cx, cy, max_radius = touch_action.coords[0], touch_action.coords[1], touch_action.coords[2]
+        dx, dy = 0.0, 0.0
+
+        if continuous_params and touch_action.param_keys:
+            dx = float(continuous_params.get(touch_action.param_keys[0], 0.0))
+            dy = float(continuous_params.get(touch_action.param_keys[1], 0.0))
+            # Clamp to [-1, 1]
+            dx = max(-1.0, min(1.0, dx))
+            dy = max(-1.0, min(1.0, dy))
+
+        ex = int(cx + dx * max_radius)
+        ey = int(cy + dy * max_radius)
+
+        # If no movement, just tap the center
+        if dx == 0.0 and dy == 0.0:
+            return f"d {pointer_id} {cx} {cy} {touch_action.duration_ms}\nc\nu {pointer_id}\nc\n"
+
+        return (
+            f"d {pointer_id} {cx} {cy} 300\nc\n"
+            f"m {pointer_id} {ex} {ey} {touch_action.duration_ms}\nc\n"
+            f"u {pointer_id}\nc\n"
+        )
