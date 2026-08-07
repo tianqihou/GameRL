@@ -13,7 +13,13 @@ import numpy as np
 import pytest
 
 from gamerl.environment.reward import RewardShaper
-from gamerl.profiles import HonorOfKingsProfile, PeacekeeperEliteProfile, GenshinImpactProfile
+from gamerl.profiles import (
+    HonorOfKingsProfile,
+    PeacekeeperEliteProfile,
+    GenshinImpactProfile,
+    MiniWorldProfile,
+    RocoKingdomProfile,
+)
 
 
 class TestRewardShaper:
@@ -144,7 +150,8 @@ class TestRewardShaperFromProfile:
 
     def test_state_classes_match_profile(self):
         """Shaper's state_classes should match the profile's."""
-        for profile_cls in [HonorOfKingsProfile, PeacekeeperEliteProfile, GenshinImpactProfile]:
+        for profile_cls in [HonorOfKingsProfile, PeacekeeperEliteProfile, GenshinImpactProfile,
+                            MiniWorldProfile, RocoKingdomProfile]:
             profile = profile_cls()
             shaper = RewardShaper.from_profile(profile)
             assert shaper.state_classes == profile.state_classes
@@ -195,16 +202,59 @@ class TestGameSpecificRewards:
         assert "kill_minion" not in events
         assert "kill_enemy" not in events
 
+    def test_mini_world_has_sandbox_specific_events(self):
+        profile = MiniWorldProfile()
+        events = profile.reward_events
+        # Sandbox specific events
+        assert "collect_resource" in events
+        assert "craft_item" in events
+        assert "place_block" in events
+        assert "defeat_mob" in events
+        assert "defeat_boss" in events
+        assert "survive_night" in events
+        assert "tame_pet" in events
+        assert "upgrade_tool" in events
+        assert "harvest_crop" in events
+        # Should NOT have MOBA, FPS, or RPG events
+        assert "kill_minion" not in events
+        assert "kill_enemy" not in events
+        assert "chest_opened" not in events
+        # Sandbox: no terminal events
+        assert profile.terminal_events == []
+
+    def test_roco_kingdom_has_pet_rpg_specific_events(self):
+        profile = RocoKingdomProfile()
+        events = profile.reward_events
+        # Pet collection RPG specific events
+        assert "catch_pet" in events
+        assert "discover_new_pet" in events
+        assert "pet_evolve" in events
+        assert "win_battle" in events
+        assert "defeat_world_boss" in events
+        assert "pet_downed" in events
+        assert "battle_lost" in events
+        assert "complete_quest" in events
+        assert "unlock_area" in events
+        # Should NOT have MOBA, FPS, or sandbox events
+        assert "kill_minion" not in events
+        assert "kill_enemy" not in events
+        assert "craft_item" not in events
+        assert "place_block" not in events
+        # Battle lost is terminal
+        assert "battle_lost" in profile.terminal_events
+
     def test_all_games_have_normal_and_other(self):
         """Every game must define 'normal' and 'other' baseline events."""
-        for profile_cls in [HonorOfKingsProfile, PeacekeeperEliteProfile, GenshinImpactProfile]:
+        for profile_cls in [HonorOfKingsProfile, PeacekeeperEliteProfile, GenshinImpactProfile,
+                            MiniWorldProfile, RocoKingdomProfile]:
             events = profile_cls().reward_events
             assert "normal" in events, f"{profile_cls.__name__} missing 'normal'"
             assert "other" in events, f"{profile_cls.__name__} missing 'other'"
 
     def test_reward_values_are_sensible(self):
         """Rewards should make sense: positive for good, negative for bad."""
-        for profile_cls in [HonorOfKingsProfile, PeacekeeperEliteProfile, GenshinImpactProfile]:
+        for profile_cls in [HonorOfKingsProfile, PeacekeeperEliteProfile, GenshinImpactProfile,
+                            MiniWorldProfile, RocoKingdomProfile]:
             events = profile_cls().reward_events
             # Positive events (kills, wins, completions)
             positive_keys = [k for k, v in events.items() if v > 0 and k not in ("normal",)]
@@ -214,13 +264,15 @@ class TestGameSpecificRewards:
             assert len(negative_keys) >= 1, f"{profile_cls.__name__} should have negative rewards"
 
     def test_no_reward_sharing_between_games(self):
-        """No game-specific event should appear in all three games."""
+        """No game-specific event should appear in all five games."""
         hok = set(HonorOfKingsProfile().reward_events.keys())
         pk = set(PeacekeeperEliteProfile().reward_events.keys())
         gs = set(GenshinImpactProfile().reward_events.keys())
+        mw = set(MiniWorldProfile().reward_events.keys())
+        rk = set(RocoKingdomProfile().reward_events.keys())
 
         # Only baseline events should be shared across all games
-        shared = hok & pk & gs
+        shared = hok & pk & gs & mw & rk
         assert shared <= {"normal", "other"}, (
             f"Unexpected shared events: {shared - {'normal', 'other'}}"
         )

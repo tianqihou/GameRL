@@ -15,12 +15,16 @@ from .base import GameProfile
 from .honor_of_kings import HonorOfKingsProfile
 from .peacekeeper import PeacekeeperEliteProfile
 from .genshin import GenshinImpactProfile
+from .mini_world import MiniWorldProfile
+from .roco_kingdom import RocoKingdomProfile
 
 # Registry of available game profiles
 PROFILES: Dict[str, Type[GameProfile]] = {
     "honor_of_kings": HonorOfKingsProfile,
     "peacekeeper": PeacekeeperEliteProfile,
     "genshin": GenshinImpactProfile,
+    "mini_world": MiniWorldProfile,
+    "roco_kingdom": RocoKingdomProfile,
 }
 
 # Human-readable aliases
@@ -32,6 +36,12 @@ ALIASES: Dict[str, str] = {
     "pubg_mobile": "peacekeeper",
     "原神": "genshin",
     "gi": "genshin",
+    "迷你世界": "mini_world",
+    "mw": "mini_world",
+    "miniworld": "mini_world",
+    "洛克王国": "roco_kingdom",
+    "洛克王国世界": "roco_kingdom",
+    "rkc": "roco_kingdom",
 }
 
 
@@ -71,6 +81,8 @@ __all__ = [
     "HonorOfKingsProfile",
     "PeacekeeperEliteProfile",
     "GenshinImpactProfile",
+    "MiniWorldProfile",
+    "RocoKingdomProfile",
     "PROFILES",
     "ALIASES",
     "get_profile",

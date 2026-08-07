@@ -1,7 +1,7 @@
 # GameRL - 用现代强化学习训练 AI 玩游戏
 
 > 基于 [FengQuanLi/WZCQ](https://github.com/FengQuanLi/WZCQ) 原项目，使用最新技术栈全面重构。
-> 支持王者荣耀、和平精英、原神等多游戏，通过 GameProfile 抽象层一键切换。
+> 支持王者荣耀、和平精英、原神、迷你世界、洛克王国世界等多游戏，通过 GameProfile 抽象层一键切换。
 
 ## 项目简介
 
@@ -26,7 +26,7 @@ WZCQ（王者荣耀）原项目创建于 2021 年，使用 PyTorch 1.9 + ResNet1
 | **配置** | 散落在各文件中的硬编码 | YAML + dataclass |
 | **日志** | `print()` | Python logging + TensorBoard |
 | **奖励系统** | 固定 7 字段 MOBA 专用 | 按游戏差异化的事件驱动 RewardShaper |
-| **测试** | 无 | 126 个 pytest 单元测试全部通过 |
+| **测试** | 无 | 151 个 pytest 单元测试全部通过 |
 | **依赖管理** | conda environment.yml | pyproject.toml (PEP 621) |
 
 ## 项目结构
@@ -94,7 +94,7 @@ GameRL/
 │
 ├── configs/
 │   └── default.yaml                    # 默认配置 (含 vision/runtime/inference 段)
-├── tests/                              # 126 个单元测试
+├── tests/                              # 151 个单元测试
 │   ├── test_models.py                  # 模型测试
 │   ├── test_agent.py                   # PPO Agent 测试
 │   ├── test_profiles.py                # GameProfile 测试
@@ -156,7 +156,7 @@ scrcpy --max-size 960
 
 ```yaml
 game:
-  name: "peacekeeper"  # 王者荣耀: honor_of_kings | 和平精英: peacekeeper | 原神: genshin
+  name: "peacekeeper"  # 王者荣耀: honor_of_kings | 和平精英: peacekeeper | 原神: genshin | 迷你世界: mini_world | 洛克王国: roco_kingdom
 ```
 
 ### 内置游戏 Profile
@@ -166,8 +166,10 @@ game:
 | **王者荣耀** | 130 (10×13) | 2400×1080 | 英雄/血条/技能/塔/小兵 | kill_minion, kill_tower, kill_hero, assist_kill, attacked_by_tower, killed, death | death |
 | **和平精英** | 80 (8×10) | 2340×1080 | 玩家/武器/载具/空投/安全区 | kill_enemy, down_enemy, got_killed, teammate_died, survived_frame, reached_final_circle, won_match, loot_item | got_killed, won_match |
 | **原神** | 72 (8×9) | 2560×1440 | 角色/敌人/宝箱/NPC/采集物 | defeat_enemy, defeat_boss, character_downed, party_wiped, chest_opened, material_collected, quest_completed, exploration | party_wiped |
+| **迷你世界** | 64 (8×8) | 1920×1080 | 玩家/怪物/资源点/掉落物/方块/NPC/Boss | collect_resource, craft_item, place_block, defeat_mob, defeat_boss, survive_night, tame_pet, upgrade_tool, harvest_crop, take_damage, starve | 无 (沙盒模式) |
+| **洛克王国** | 50 (5×10) | 1920×1080 | 玩家/野生精灵/敌方精灵/NPC/宝箱/资源/Boss | catch_pet, discover_new_pet, pet_evolve, win_battle, defeat_world_boss, pet_downed, battle_lost, open_chest, unlock_area, complete_quest | battle_lost |
 
-三个游戏的奖励事件**零重叠**——每个游戏定义完全独立的奖励语义，不再共用 MOBA 专用字段。
+五个游戏的奖励事件**零重叠**——每个游戏定义完全独立的奖励语义，不再共用 MOBA 专用字段。
 
 ### 扩展新游戏
 
@@ -480,7 +482,7 @@ pytest tests/ -v
 # 仅运行特定模块
 pytest tests/test_vision.py -v      # 视觉检测
 pytest tests/test_runtime.py -v     # 运行时调度
-pytest tests/test_profiles.py -v    # 游戏 Profile
+pytest tests/test_profiles.py -v    # 游戏 Profile (5 游戏)
 pytest tests/test_models.py -v      # 神经网络模型
 pytest tests/test_agent.py -v       # PPO Agent
 pytest tests/test_reward.py -v      # 奖励系统
@@ -508,7 +510,7 @@ tensorboard --logdir runs/
 | 部署加速 | ONNX + TensorRT (FP16/INT8) |
 | 配置管理 | YAML + dataclass |
 | 依赖管理 | pyproject.toml (PEP 621) |
-| 测试 | pytest (126 tests) |
+| 测试 | pytest (151 tests) |
 | 日志 | Python logging + TensorBoard |
 
 ## 致谢
