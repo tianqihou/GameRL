@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from ..utils.actions import ActionSpace
+from ..utils.actions import ActionSpace, UniversalActionSpace
 
 
 @dataclass
@@ -69,20 +69,46 @@ class GameProfile(ABC):
     """
     Base class for game-specific profiles.
 
-    Subclasses must define:
+    **Action modes:**
+
+    * ``"universal"`` (default) — the action space is the fixed set of
+      phone touch primitives (:class:`UniversalActionSpace`).  The policy
+      always outputs 7 discrete touch types + 5 continuous params.
+      The profile does **not** need to define movements, actions, or
+      touch_mapping.  This is the recommended mode for new games.
+
+    * ``"legacy"`` — the profile defines per-game movements, actions,
+      and touch_mapping (the original per-game action space).  Use this
+      only for backward compatibility with existing trained models.
+
+    Subclasses must define (both modes):
     - display_name: Human-readable game name
-    - movements: List of movement action labels (strings)
-    - actions: List of button/action labels (strings)
-    - bos_token: Token ID for beginning-of-sequence (within vocab)
+    - state_classes: List of game state category names
+    - reward_events: Dict[str, float] mapping event names to reward weights
+    - resolution: Default screen resolution (width, height)
+
+    Subclasses must additionally define (legacy mode only):
+    - movements: List of movement action labels
+    - actions: List of button/action labels
+    - bos_token: Token ID for beginning-of-sequence
     - idle_movements: Movement labels that require no touch command
     - idle_actions: Action labels that require no touch command
-    - state_classes: List of game state category names
     - touch_mapping: Dict mapping action labels to TouchAction objects
     - screen_regions: Dict of named ScreenRegion objects
-    - resolution: Default screen resolution (width, height)
-    - reward_events: Dict[str, float] mapping event names to reward weights
-    - terminal_events: List of event names that signal episode end
     """
+
+    @property
+    def action_mode(self) -> str:
+        """Action space mode: 'universal' (default) or 'legacy'.
+
+        Override to 'legacy' in subclass to use per-game action space.
+        """
+        return "universal"
+
+    @property
+    def is_universal(self) -> bool:
+        """True when this profile uses the universal action space."""
+        return self.action_mode == "universal"
 
     @property
     @abstractmethod
@@ -90,35 +116,38 @@ class GameProfile(ABC):
         """Human-readable game name."""
         ...
 
+    # ---- Legacy action properties (only needed when action_mode == 'legacy') ----
+
     @property
-    @abstractmethod
     def movements(self) -> List[str]:
-        """Movement direction labels (e.g., ['上移', '下移', ...])."""
-        ...
+        """Movement direction labels (legacy mode only)."""
+        if self.is_universal:
+            return []
+        raise NotImplementedError("Override 'movements' for legacy action mode")
 
     @property
-    @abstractmethod
     def actions(self) -> List[str]:
-        """Button/action labels (e.g., ['攻击', '一技能', ...])."""
-        ...
+        """Button/action labels (legacy mode only)."""
+        if self.is_universal:
+            return []
+        raise NotImplementedError("Override 'actions' for legacy action mode")
 
     @property
-    @abstractmethod
     def bos_token(self) -> int:
-        """Beginning-of-sequence token ID (must be within vocab range)."""
-        ...
+        """Beginning-of-sequence token ID."""
+        if self.is_universal:
+            return UniversalActionSpace.BOS_TOKEN
+        raise NotImplementedError("Override 'bos_token' for legacy action mode")
 
     @property
-    @abstractmethod
     def idle_movements(self) -> List[str]:
-        """Movement labels that require no touch command (e.g., ['无移动'])."""
-        ...
+        """Movement labels that require no touch command (legacy mode only)."""
+        return []
 
     @property
-    @abstractmethod
     def idle_actions(self) -> List[str]:
-        """Action labels that require no touch command (e.g., ['无动作'])."""
-        ...
+        """Action labels that require no touch command (legacy mode only)."""
+        return []
 
     @property
     @abstractmethod
@@ -127,16 +156,14 @@ class GameProfile(ABC):
         ...
 
     @property
-    @abstractmethod
     def touch_mapping(self) -> Dict[str, TouchAction]:
-        """Maps action/movement labels to touch coordinates."""
-        ...
+        """Maps action/movement labels to touch coordinates (legacy mode only)."""
+        return {}
 
     @property
-    @abstractmethod
     def screen_regions(self) -> Dict[str, ScreenRegion]:
-        """Named screen regions of interest."""
-        ...
+        """Named screen regions of interest. Override for game-specific regions."""
+        return {}
 
     @property
     @abstractmethod
@@ -146,25 +173,19 @@ class GameProfile(ABC):
 
     @property
     def continuous_params(self) -> List[str]:
-        """Names of continuous parameters the policy outputs for this game.
+        """Names of continuous parameters the policy outputs.
 
-        Override in subclass to enable hybrid action space.  Each name
-        corresponds to one scalar in [-1, 1] that the policy network
-        produces alongside the discrete token.
-
-        Examples:
-        - Peacekeeper: ["look_dx", "look_dy"]  -- aim / look direction
-        - Genshin:     ["aim_dx", "aim_dy"]     -- burst / bow aim
-        - HoK:         []                        -- pure discrete (default)
-
-        TouchActions of type "look" or "dynamic_joystick" reference these
-        names via their ``param_keys`` field.
+        In **universal** mode this is always the 5 phone-touch params
+        (x, y, dx, dy, duration).  In **legacy** mode, override to
+        specify game-specific continuous params (e.g. aim direction).
         """
+        if self.is_universal:
+            return list(UniversalActionSpace.CONTINUOUS_PARAMS)
         return []
 
     @property
     def num_continuous_params(self) -> int:
-        """Number of continuous parameters (0 for pure-discrete games)."""
+        """Number of continuous parameters."""
         return len(self.continuous_params)
 
     @property
@@ -211,7 +232,11 @@ class GameProfile(ABC):
 
     @property
     def action_space(self) -> ActionSpace:
-        """Construct an ActionSpace from this profile's movements and actions."""
+        """Construct an ActionSpace from this profile's movements and actions.
+
+        Only meaningful in legacy mode.  In universal mode, use
+        :attr:`universal_action_space` instead.
+        """
         return ActionSpace(
             movements=self.movements,
             actions=self.actions,
@@ -219,8 +244,19 @@ class GameProfile(ABC):
         )
 
     @property
+    def universal_action_space(self) -> "UniversalActionSpace":
+        """The universal action space (same for all games)."""
+        return UniversalActionSpace()
+
+    @property
     def vocab_size(self) -> int:
-        """Total vocabulary size (movements * actions)."""
+        """Total vocabulary size.
+
+        In universal mode this is always 7 (touch types).
+        In legacy mode it's len(movements) * len(actions).
+        """
+        if self.is_universal:
+            return UniversalActionSpace.DISCRETE_SIZE
         return len(self.movements) * len(self.actions)
 
     @property
@@ -244,16 +280,13 @@ class GameProfile(ABC):
         """Serialize profile to a dictionary (for logging/debugging)."""
         return {
             "display_name": self.display_name,
-            "movements": self.movements,
-            "actions": self.actions,
+            "action_mode": self.action_mode,
             "vocab_size": self.vocab_size,
             "bos_token": self.bos_token,
             "state_classes": self.state_classes,
             "resolution": list(self.resolution),
-            "idle_movements": self.idle_movements,
-            "idle_actions": self.idle_actions,
-            "reward_events": self.reward_events,
-            "terminal_events": self.terminal_events,
             "continuous_params": self.continuous_params,
             "is_hybrid": self.is_hybrid,
+            "reward_events": self.reward_events,
+            "terminal_events": self.terminal_events,
         }

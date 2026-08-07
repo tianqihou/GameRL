@@ -271,3 +271,71 @@ class TransformerPolicy(nn.Module):
     def count_parameters(self) -> int:
         """Count total trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    # ---- Factory methods ----
+
+    @classmethod
+    def for_universal(
+        cls,
+        feature_dim: int,
+        d_model: int = 768,
+        n_layers: int = 12,
+        n_heads: int = 12,
+        dropout: float = 0.0,
+        max_seq_len: int = 512,
+    ) -> "TransformerPolicy":
+        """Create a policy configured for the universal action space.
+
+        The universal action space is fixed across ALL games:
+        - 7 discrete touch types
+        - 5 continuous parameters (x, y, dx, dy, duration)
+
+        This is the recommended factory for new games.
+        """
+        from ..utils.actions import UniversalActionSpace
+        return cls(
+            feature_dim=feature_dim,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            vocab_size=UniversalActionSpace.DISCRETE_SIZE,
+            dropout=dropout,
+            max_seq_len=max_seq_len,
+            continuous_dim=UniversalActionSpace.CONTINUOUS_DIM,
+        )
+
+    @classmethod
+    def from_profile(
+        cls,
+        profile,
+        feature_dim: int,
+        d_model: int = 768,
+        n_layers: int = 12,
+        n_heads: int = 12,
+        dropout: float = 0.0,
+        max_seq_len: int = 512,
+    ) -> "TransformerPolicy":
+        """Create a policy configured for a specific GameProfile.
+
+        In universal mode: vocab_size=7, continuous_dim=5.
+        In legacy mode: vocab_size=profile.vocab_size, continuous_dim=profile.num_continuous_params.
+        """
+        if profile.is_universal:
+            return cls.for_universal(
+                feature_dim=feature_dim,
+                d_model=d_model,
+                n_layers=n_layers,
+                n_heads=n_heads,
+                dropout=dropout,
+                max_seq_len=max_seq_len,
+            )
+        return cls(
+            feature_dim=feature_dim,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            vocab_size=profile.vocab_size,
+            dropout=dropout,
+            max_seq_len=max_seq_len,
+            continuous_dim=profile.num_continuous_params,
+        )

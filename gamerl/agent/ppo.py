@@ -34,6 +34,7 @@ from torch.distributions import Categorical, Normal
 from ..config import AgentConfig
 from ..models.backbone import BackboneExtractor
 from ..models.transformer import TransformerPolicy
+from ..utils.actions import UniversalActionSpace
 from ..utils.masks import create_causal_mask, create_padding_mask
 from .memory import RolloutMemory
 
@@ -76,6 +77,34 @@ class PPOAgent:
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.device.type == "cuda")
 
         self.memory = RolloutMemory()
+
+    @classmethod
+    def from_profile(
+        cls,
+        profile,
+        config: AgentConfig,
+        backbone: Optional[BackboneExtractor] = None,
+        device: torch.device | str = "cuda",
+        feature_dim: int = 0,
+        d_model: int = 768,
+        n_layers: int = 12,
+        n_heads: int = 12,
+    ) -> "PPOAgent":
+        """Create a PPOAgent configured for a specific GameProfile.
+
+        In universal mode: policy is created with vocab_size=7, continuous_dim=5.
+        In legacy mode: policy is created with the profile's vocab_size and continuous params.
+        """
+        if feature_dim == 0 and backbone is not None:
+            feature_dim = backbone.feature_dim
+        policy = TransformerPolicy.from_profile(
+            profile=profile,
+            feature_dim=feature_dim,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+        )
+        return cls(config=config, policy=policy, backbone=backbone, device=device)
 
     @torch.no_grad()
     def extract_features(self, images: torch.Tensor) -> torch.Tensor:

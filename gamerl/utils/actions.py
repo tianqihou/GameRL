@@ -235,3 +235,148 @@ class HybridActionSpace:
             discrete=profile.action_space,
             continuous_param_names=profile.continuous_params,
         )
+
+
+# ---------------------------------------------------------------------------
+# Universal Action Space — phone touch primitives (game-agnostic)
+# ---------------------------------------------------------------------------
+
+class TouchType(Enum):
+    """Phone touch primitive types — universal across ALL games.
+
+    These are the fundamental operations a touchscreen supports.
+    The policy network always outputs one of these 7 types plus
+    5 continuous parameters (x, y, dx, dy, duration) that specify
+    *where* and *how* to perform the touch.
+    """
+
+    TAP = 0           # Quick touch-and-release at (x, y)
+    LONG_PRESS = 1    # Hold at (x, y) for `duration` ms
+    SWIPE = 2         # Touch at (x, y), slide to (x+dx, y+dy), release
+    DRAG = 3          # Touch at (x, y), slide to (x+dx, y+dy), hold (joystick-style)
+    DOUBLE_TAP = 4    # Two rapid taps at (x, y)
+    KEY_EVENT = 5     # Hardware key (back/home/menu), selected by `x` param
+    WAIT = 6          # No touch, wait for `duration` ms
+
+
+# Hardware keys mappable via the KEY_EVENT touch type.
+# The continuous `x` param in [-1, 1] is mapped to an index into this list.
+HARDWARE_KEYS = [
+    "KEYCODE_BACK",
+    "KEYCODE_HOME",
+    "KEYCODE_APP_SWITCH",
+    "KEYCODE_VOLUME_UP",
+    "KEYCODE_VOLUME_DOWN",
+]
+
+
+class UniversalActionSpace:
+    """Universal action space based on phone touch primitives.
+
+    This is the **same for every game**.  The policy network always
+    outputs:
+
+    * **7 discrete logits** — one per :class:`TouchType`
+    * **5 continuous parameters** (all in ``[-1, 1]``):
+      ``x``, ``y``, ``dx``, ``dy``, ``duration``
+
+    At execution time the :class:`~gamerl.environment.device.TouchExecutor`
+    converts these normalized values into real screen coordinates and
+    ADB commands using the device resolution.
+
+    Parameter mapping (all inputs in [-1, 1]):
+      x        -> pixel_x = (x + 1) / 2 * screen_width
+      y        -> pixel_y = (y + 1) / 2 * screen_height
+      dx       -> pixel_dx = dx * min(w, h) / 2
+      dy       -> pixel_dy = dy * min(w, h) / 2
+      duration -> ms = (duration + 1) / 2 * 1950 + 50   (50ms to 2000ms)
+
+    This completely replaces the per-game ``ActionSpace`` +
+    ``touch_mapping`` approach.  Games no longer need to define
+    movements, actions, or button coordinates — the policy learns
+    *where* to touch through reinforcement learning.
+    """
+
+    DISCRETE_SIZE: int = len(TouchType)          # 7
+    CONTINUOUS_PARAMS: List[str] = ["x", "y", "dx", "dy", "duration"]
+    CONTINUOUS_DIM: int = 5
+    BOS_TOKEN: int = TouchType.WAIT.value        # neutral starting action
+
+    # Aliases (plain class attributes, not @classmethod @property)
+    vocab_size: int = DISCRETE_SIZE
+    size: int = DISCRETE_SIZE
+
+    # duration range in milliseconds
+    MIN_DURATION_MS: int = 50
+    MAX_DURATION_MS: int = 2000
+
+    @staticmethod
+    def decode_params(
+        params,
+        resolution: Tuple[int, int],
+    ) -> Tuple[int, int, int, int, int]:
+        """Convert normalized [-1, 1] params to pixel coordinates.
+
+        Args:
+            params: Array-like of 5 values in [-1, 1].
+            resolution: (width, height) of the device screen.
+
+        Returns:
+            Tuple of (pixel_x, pixel_y, pixel_dx, pixel_dy, duration_ms).
+        """
+        w, h = resolution
+        half_min = min(w, h) / 2
+
+        px = int((float(params[0]) + 1.0) / 2.0 * w)
+        py = int((float(params[1]) + 1.0) / 2.0 * h)
+        pdx = int(float(params[2]) * half_min)
+        pdy = int(float(params[3]) * half_min)
+        dur = int((float(params[4]) + 1.0) / 2.0 *
+                  (UniversalActionSpace.MAX_DURATION_MS -
+                   UniversalActionSpace.MIN_DURATION_MS) +
+                  UniversalActionSpace.MIN_DURATION_MS)
+
+        # Clamp to screen bounds
+        px = max(0, min(w - 1, px))
+        py = max(0, min(h - 1, py))
+
+        return px, py, pdx, pdy, dur
+
+    @staticmethod
+    def decode_key_index(x_param: float) -> int:
+        """Map the x continuous param to a hardware key index."""
+        idx = int((x_param + 1.0) / 2.0 * len(HARDWARE_KEYS))
+        return max(0, min(len(HARDWARE_KEYS) - 1, idx))
+
+    @staticmethod
+    def sample() -> Tuple[int, np.ndarray]:
+        """Sample a random universal action.
+
+        Returns:
+            Tuple of (touch_type_idx, continuous_params) where
+            continuous_params is a float32 array of shape (5,).
+        """
+        touch_type = np.random.randint(0, UniversalActionSpace.DISCRETE_SIZE)
+        params = np.random.uniform(-1.0, 1.0, size=UniversalActionSpace.CONTINUOUS_DIM).astype(np.float32)
+        return int(touch_type), params
+
+    @staticmethod
+    def clamp_continuous(params) -> np.ndarray:
+        """Clamp continuous parameters to [-1, 1]."""
+        if torch is not None and isinstance(params, torch.Tensor):
+            return params.clamp(-1.0, 1.0)
+        return np.clip(params, -1.0, 1.0)
+
+    @staticmethod
+    def neutral_params() -> np.ndarray:
+        """Return neutral continuous params (screen center, no movement, short duration)."""
+        return np.array([0.0, 0.0, 0.0, 0.0, -1.0], dtype=np.float32)
+
+    @staticmethod
+    def describe(touch_type: int, params, resolution: Tuple[int, int]) -> str:
+        """Human-readable description of a universal action."""
+        px, py, pdx, pdy, dur = UniversalActionSpace.decode_params(params, resolution)
+        name = TouchType(touch_type).name
+        return (
+            f"{name}(x={px}, y={py}, dx={pdx}, dy={pdy}, dur={dur}ms)"
+        )

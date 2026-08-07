@@ -17,9 +17,9 @@ import torch
 from PIL import Image
 
 from ..models.backbone import BackboneExtractor
-from ..utils.actions import ActionSpace, BOS_TOKEN
+from ..utils.actions import ActionSpace, BOS_TOKEN, UniversalActionSpace
 from .capture import ScreenCapture
-from .device import ADBDevice, ActionMapper
+from .device import ADBDevice, ActionMapper, TouchExecutor
 from .reward import RewardShaper
 
 logger = logging.getLogger("gamerl.environment")
@@ -44,15 +44,28 @@ class GameEnvironment:
     - State history management (sliding window)
     - Reward computation via RewardShaper (optional)
 
+    **Action modes:**
+
+    * **Universal** (default) — uses :class:`TouchExecutor` to execute
+      phone touch primitives (tap, swipe, drag, …) at normalised screen
+      coordinates.  ``step()`` receives ``(touch_type, continuous_params)``.
+      The action history stores touch-type indices (0–6).
+
+    * **Legacy** — uses :class:`ActionMapper` with per-game
+      ``touch_mapping``.  ``step()`` receives a discrete token that is
+      decoded into (movement, action) and looked up in the mapping.
+
     Args:
         capture: Screen capture backend.
         device: ADB device controller.
         backbone: Image feature extraction backbone.
-        action_space: Action space definition.
-        action_mapper: Action-to-touch-command mapper.
-        profile: Optional game profile for idle action checks.
+        action_space: Action space definition (legacy mode).
+        action_mapper: Action-to-touch-command mapper (legacy mode).
+        profile: Optional game profile for idle action checks and mode detection.
         max_history: Maximum sequence length for state history.
         reward_shaper: Optional RewardShaper for computing rewards and done flags.
+        touch_executor: Optional TouchExecutor (universal mode).  If not
+            provided but profile is universal, one is created from the profile.
     """
 
     def __init__(
@@ -60,29 +73,49 @@ class GameEnvironment:
         capture: ScreenCapture,
         device: ADBDevice,
         backbone: BackboneExtractor,
-        action_space: ActionSpace,
-        action_mapper: ActionMapper,
+        action_space: ActionSpace | None = None,
+        action_mapper: ActionMapper | None = None,
         profile=None,
         max_history: int = 300,
         reward_shaper: Optional[RewardShaper] = None,
+        touch_executor: TouchExecutor | None = None,
     ):
         self.capture = capture
         self.device = device
         self.backbone = backbone
-        self.action_space = action_space
-        self.action_mapper = action_mapper
         self.profile = profile
         self.max_history = max_history
         self.reward_shaper = reward_shaper
 
+        # Detect action mode
+        self.is_universal = profile is not None and profile.is_universal
+
+        if self.is_universal:
+            # Universal mode: use TouchExecutor
+            self.touch_executor = touch_executor or TouchExecutor(
+                device=device,
+                resolution=profile.resolution if profile else (1080, 2160),
+            )
+            self.action_space = None
+            self.action_mapper = None
+            self._bos_token = UniversalActionSpace.BOS_TOKEN
+        else:
+            # Legacy mode: use ActionMapper
+            self.action_space = action_space or (profile.action_space if profile else ActionSpace())
+            self.action_mapper = action_mapper or (
+                ActionMapper.from_profile(profile) if profile else ActionMapper({})
+            )
+            self.touch_executor = None
+            self._bos_token = BOS_TOKEN
+
         # State history
         self._image_features: List[np.ndarray] = []
-        self._action_history: List[int] = [BOS_TOKEN]
+        self._action_history: List[int] = [self._bos_token]
 
     def reset(self) -> GameState:
         """Reset the environment and return initial state."""
         self._image_features.clear()
-        self._action_history = [BOS_TOKEN]
+        self._action_history = [self._bos_token]
 
         # Capture initial frame
         img = self.capture.capture()
@@ -100,45 +133,27 @@ class GameEnvironment:
         """
         Execute an action and return the new state.
 
-        For hybrid action spaces, *continuous_params* carries the runtime
-        values (e.g. aim direction) that dynamic touch actions (``"look"``,
-        ``"dynamic_joystick"``) consume to compute their coordinates.
+        **Universal mode:** *action* is a :class:`TouchType` index (0–6)
+        and *continuous_params* is a dict with keys ``x``, ``y``, ``dx``,
+        ``dy``, ``duration`` (values in [-1, 1]).  The :class:`TouchExecutor`
+        converts them to ADB touch commands.
+
+        **Legacy mode:** *action* is a discrete token decoded into
+        (movement, action_type) strings and looked up in the profile's
+        ``touch_mapping``.  *continuous_params* carries runtime values
+        for dynamic actions (``"look"``, ``"dynamic_joystick"``).
 
         Args:
-            action: Discrete action token.
-            continuous_params: Optional dict mapping param names to values
-                in [-1, 1].  Ignored for pure-discrete games.
+            action: Discrete action token (touch-type index in universal mode).
+            continuous_params: Optional dict of param name → value.
 
         Returns:
             Tuple of (state, reward, done, info).
         """
-        # Decode action
-        movement, action_type = self.action_space.decode(action)
-
-        # Execute movement (skip idle movements)
-        should_move = True
-        if self.profile is not None:
-            should_move = not self.profile.is_idle_movement(movement)
+        if self.is_universal:
+            self._step_universal(action, continuous_params)
         else:
-            # Fallback: check against common idle labels
-            should_move = movement not in ("无移动", "移动停", "noop")
-
-        if should_move:
-            cmd = self.action_mapper.get_action_command(movement, continuous_params)
-            if cmd:
-                self.device.send_touch_command(cmd)
-
-        # Execute action type (skip idle actions)
-        should_act = True
-        if self.profile is not None:
-            should_act = not self.profile.is_idle_action(action_type)
-        else:
-            should_act = action_type not in ("无动作", "noop")
-
-        if should_act:
-            cmd = self.action_mapper.get_action_command(action_type, continuous_params)
-            if cmd:
-                self.device.send_touch_command(cmd)
+            self._step_legacy(action, continuous_params)
 
         # Capture new frame
         img = self.capture.capture()
@@ -173,6 +188,60 @@ class GameEnvironment:
             info = {}
 
         return state, reward, done, info
+
+    def _step_universal(
+        self,
+        touch_type: int,
+        continuous_params: Dict[str, float] | None,
+    ) -> None:
+        """Execute a universal touch primitive on the device."""
+        from ..utils.actions import UniversalActionSpace, TouchType
+
+        # Convert dict params to ordered array
+        if continuous_params is not None:
+            params = np.array([
+                continuous_params.get(name, 0.0)
+                for name in UniversalActionSpace.CONTINUOUS_PARAMS
+            ], dtype=np.float32)
+        else:
+            params = UniversalActionSpace.neutral_params()
+
+        # Skip WAIT type — just sleep, no touch
+        if touch_type != TouchType.WAIT.value:
+            self.touch_executor.execute(touch_type, params)
+
+    def _step_legacy(
+        self,
+        action: int,
+        continuous_params: Dict[str, float] | None,
+    ) -> None:
+        """Execute a legacy per-game action on the device."""
+        # Decode action
+        movement, action_type = self.action_space.decode(action)
+
+        # Execute movement (skip idle movements)
+        should_move = True
+        if self.profile is not None:
+            should_move = not self.profile.is_idle_movement(movement)
+        else:
+            should_move = movement not in ("无移动", "移动停", "noop")
+
+        if should_move:
+            cmd = self.action_mapper.get_action_command(movement, continuous_params)
+            if cmd:
+                self.device.send_touch_command(cmd)
+
+        # Execute action type (skip idle actions)
+        should_act = True
+        if self.profile is not None:
+            should_act = not self.profile.is_idle_action(action_type)
+        else:
+            should_act = action_type not in ("无动作", "noop")
+
+        if should_act:
+            cmd = self.action_mapper.get_action_command(action_type, continuous_params)
+            if cmd:
+                self.device.send_touch_command(cmd)
 
     def _extract_features(self, img: Image.Image) -> np.ndarray:
         """Extract features from a PIL image using the backbone."""

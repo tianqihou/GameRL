@@ -298,3 +298,86 @@ class ActionMapper:
             f"m {pointer_id} {ex} {ey} {touch_action.duration_ms}\nc\n"
             f"u {pointer_id}\nc\n"
         )
+
+
+class TouchExecutor:
+    """
+    Execute universal touch primitives on an Android device.
+
+    Replaces the per-game :class:`ActionMapper` when ``action_mode =
+    "universal"``.  Instead of looking up fixed coordinates in a
+    ``touch_mapping`` dict, it converts the policy's normalised output
+    (touch type + 5 continuous params) directly into ADB commands.
+
+    Args:
+        device: The :class:`ADBDevice` to send commands to.
+        resolution: Screen resolution (width, height) in pixels.
+    """
+
+    def __init__(
+        self,
+        device: ADBDevice,
+        resolution: tuple[int, int] = (1080, 2160),
+    ):
+        self.device = device
+        self.resolution = resolution
+
+    @classmethod
+    def from_profile(cls, profile, device: ADBDevice) -> "TouchExecutor":
+        """Create a TouchExecutor from a GameProfile and ADBDevice."""
+        return cls(device=device, resolution=profile.resolution)
+
+    def execute(
+        self,
+        touch_type: int,
+        continuous_params=None,
+    ) -> None:
+        """Execute a universal touch action on the device.
+
+        Args:
+            touch_type: Index into :class:`TouchType` enum (0–6).
+            continuous_params: Array-like of 5 values in [-1, 1].
+                If ``None``, neutral params are used.
+        """
+        from ..utils.actions import UniversalActionSpace, TouchType, HARDWARE_KEYS
+
+        if continuous_params is None:
+            continuous_params = UniversalActionSpace.neutral_params()
+
+        px, py, pdx, pdy, dur = UniversalActionSpace.decode_params(
+            continuous_params, self.resolution,
+        )
+
+        if touch_type == TouchType.TAP.value:
+            self.device.tap(px, py)
+
+        elif touch_type == TouchType.LONG_PRESS.value:
+            self.device.long_press(px, py, dur)
+
+        elif touch_type == TouchType.SWIPE.value:
+            ex = max(0, min(self.resolution[0] - 1, px + pdx))
+            ey = max(0, min(self.resolution[1] - 1, py + pdy))
+            self.device.swipe(px, py, ex, ey, dur)
+
+        elif touch_type == TouchType.DRAG.value:
+            # Joystick-style: touch down, move, hold briefly, release
+            ex = max(0, min(self.resolution[0] - 1, px + pdx))
+            ey = max(0, min(self.resolution[1] - 1, py + pdy))
+            self.device.swipe(px, py, ex, ey, dur)
+
+        elif touch_type == TouchType.DOUBLE_TAP.value:
+            self.device.tap(px, py)
+            time.sleep(0.05)
+            self.device.tap(px, py)
+
+        elif touch_type == TouchType.KEY_EVENT.value:
+            key_idx = UniversalActionSpace.decode_key_index(
+                float(continuous_params[0]),
+            )
+            self.device.key_event(HARDWARE_KEYS[key_idx])
+
+        elif touch_type == TouchType.WAIT.value:
+            time.sleep(dur / 1000.0)
+
+        else:
+            logger.warning(f"Unknown touch type: {touch_type}")
