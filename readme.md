@@ -131,7 +131,7 @@ GameRL/
 
 ```bash
 # 克隆项目
-git clone https://github.com/FengQuanLi/WZCQ.git
+git clone https://github.com/tianqihou/GameRL.git
 cd GameRL
 
 # 安装依赖 (推荐使用 venv)
