@@ -26,7 +26,8 @@ WZCQ（王者荣耀）原项目创建于 2021 年，使用 PyTorch 1.9 + ResNet1
 | **配置** | 散落在各文件中的硬编码 | YAML + dataclass |
 | **日志** | `print()` | Python logging + TensorBoard |
 | **奖励系统** | 固定 7 字段 MOBA 专用 | 按游戏差异化的事件驱动 RewardShaper |
-| **测试** | 无 | 151 个 pytest 单元测试全部通过 |
+| **动作空间** | 每游戏独立定义 (movements×actions + 触控坐标) | 通用手机触屏原语 (7类型 + 5连续参数，全游戏共用) |
+| **测试** | 无 | 186 个 pytest 单元测试全部通过 |
 | **依赖管理** | conda environment.yml | pyproject.toml (PEP 621) |
 
 ## 项目结构
@@ -59,16 +60,18 @@ GameRL/
 │   │   └── trt_engine.py               # ONNX → TensorRT engine (FP16/INT8)
 │   │
 │   ├── profiles/                       # 游戏配置抽象层 (NEW)
-│   │   ├── base.py                     # GameProfile 抽象基类
-│   │   ├── honor_of_kings.py           # 王者荣耀 (130 vocab)
-│   │   ├── peacekeeper.py              # 和平精英 (80 vocab, FPS 横屏)
-│   │   ├── genshin.py                  # 原神 (72 vocab, 开放世界)
+│   │   ├── base.py                     # GameProfile 抽象基类 (通用动作模式)
+│   │   ├── honor_of_kings.py           # 王者荣耀
+│   │   ├── peacekeeper.py              # 和平精英 (FPS 横屏)
+│   │   ├── genshin.py                  # 原神 (开放世界)
+│   │   ├── mini_world.py               # 迷你世界 (沙盒)
+│   │   ├── roco_kingdom.py             # 洛克王国 (回合制)
 │   │   └── __init__.py                 # 注册表 + get_profile() 工厂
 │   │
 │   ├── environment/                    # 环境交互
 │   │   ├── capture.py                  # 跨平台截图 (mss/win32/pyqt5)
-│   │   ├── device.py                   # ADB 设备控制 + 动作映射
-│   │   ├── game_env.py                 # 游戏环境封装 (接入 RewardShaper)
+│   │   ├── device.py                   # ADB 设备控制 + TouchExecutor + 动作映射
+│   │   ├── game_env.py                 # 游戏环境封装 (通用/遗留双模式)
 │   │   └── reward.py                   # 事件驱动奖励计算器 (NEW)
 │   │
 │   ├── data/                           # 数据处理
@@ -81,7 +84,7 @@ GameRL/
 │   │   └── state_trainer.py            # 状态判断模型训练
 │   │
 │   ├── utils/                          # 工具
-│   │   ├── actions.py                  # 动作空间 (通用字符串列表)
+│   │   ├── actions.py                  # 通用动作空间 + TouchType 枚举 (+遗留 ActionSpace)
 │   │   ├── logging.py                  # 日志 + TensorBoard
 │   │   └── masks.py                    # 注意力掩码生成
 │   │
@@ -94,10 +97,11 @@ GameRL/
 │
 ├── configs/
 │   └── default.yaml                    # 默认配置 (含 vision/runtime/inference 段)
-├── tests/                              # 151 个单元测试
+├── tests/                              # 186 个单元测试
 │   ├── test_models.py                  # 模型测试
 │   ├── test_agent.py                   # PPO Agent 测试
-│   ├── test_profiles.py                # GameProfile 测试
+│   ├── test_profiles.py                # GameProfile 测试 (通用动作模式)
+│   ├── test_hybrid_action.py           # 通用动作空间 + 策略/PPO 集成测试
 │   ├── test_vision.py                  # 视觉检测测试
 │   ├── test_runtime.py                 # 运行时调度测试
 │   └── test_reward.py                  # 奖励系统测试 (NEW)
@@ -161,19 +165,21 @@ game:
 
 ### 内置游戏 Profile
 
-| 游戏 | Vocab | 分辨率 | 检测目标 | 奖励事件 | 终止事件 |
-|------|-------|--------|---------|---------|---------|
-| **王者荣耀** | 130 (10×13) | 2400×1080 | 英雄/血条/技能/塔/小兵 | kill_minion, kill_tower, kill_hero, assist_kill, attacked_by_tower, killed, death | death |
-| **和平精英** | 80 (8×10) | 2340×1080 | 玩家/武器/载具/空投/安全区 | kill_enemy, down_enemy, got_killed, teammate_died, survived_frame, reached_final_circle, won_match, loot_item | got_killed, won_match |
-| **原神** | 72 (8×9) | 2560×1440 | 角色/敌人/宝箱/NPC/采集物 | defeat_enemy, defeat_boss, character_downed, party_wiped, chest_opened, material_collected, quest_completed, exploration | party_wiped |
-| **迷你世界** | 64 (8×8) | 1920×1080 | 玩家/怪物/资源点/掉落物/方块/NPC/Boss | collect_resource, craft_item, place_block, defeat_mob, defeat_boss, survive_night, tame_pet, upgrade_tool, harvest_crop, take_damage, starve | 无 (沙盒模式) |
-| **洛克王国** | 50 (5×10) | 1920×1080 | 玩家/野生精灵/敌方精灵/NPC/宝箱/资源/Boss | catch_pet, discover_new_pet, pet_evolve, win_battle, defeat_world_boss, pet_downed, battle_lost, open_chest, unlock_area, complete_quest | battle_lost |
+所有游戏共享同一套**通用动作空间**（7 种触屏类型 + 5 个连续参数），Profile 只定义检测目标和奖励事件：
+
+| 游戏 | 分辨率 | 检测目标 | 奖励事件 | 终止事件 |
+|------|--------|---------|---------|---------|
+| **王者荣耀** | 2400×1080 | 英雄/血条/技能/塔/小兵 | kill_minion, kill_tower, kill_hero, assist_kill, attacked_by_tower, killed, death | death |
+| **和平精英** | 2340×1080 | 玩家/武器/载具/空投/安全区 | kill_enemy, down_enemy, got_killed, teammate_died, survived_frame, reached_final_circle, won_match, loot_item | got_killed, won_match |
+| **原神** | 2560×1440 | 角色/敌人/宝箱/NPC/采集物 | defeat_enemy, defeat_boss, character_downed, party_wiped, chest_opened, material_collected, quest_completed, exploration | party_wiped |
+| **迷你世界** | 1920×1080 | 玩家/怪物/资源点/掉落物/方块/NPC/Boss | collect_resource, craft_item, place_block, defeat_mob, defeat_boss, survive_night, tame_pet, upgrade_tool, harvest_crop, take_damage, starve | 无 (沙盒模式) |
+| **洛克王国** | 1920×1080 | 玩家/野生精灵/敌方精灵/NPC/宝箱/资源/Boss | catch_pet, discover_new_pet, pet_evolve, win_battle, defeat_world_boss, pet_downed, battle_lost, open_chest, unlock_area, complete_quest | battle_lost |
 
 五个游戏的奖励事件**零重叠**——每个游戏定义完全独立的奖励语义，不再共用 MOBA 专用字段。
 
 ### 扩展新游戏
 
-继承 `GameProfile`，实现抽象属性即可：
+继承 `GameProfile`，只需定义游戏理解（检测目标 + 奖励事件），无需定义任何触控坐标：
 
 ```python
 from gamerl.profiles.base import GameProfile
@@ -182,9 +188,9 @@ class MyGameProfile(GameProfile):
     @property
     def name(self) -> str: return "my_game"
     @property
-    def movements(self) -> list[str]: return ["up", "down", ...]
+    def display_name(self) -> str: return "我的游戏"
     @property
-    def actions(self) -> list[str]: return ["attack", "skill", ...]
+    def resolution(self) -> tuple[int, int]: return (1920, 1080)
     @property
     def detection_classes(self) -> list[str]: return ["enemy", "item", ...]
     @property
@@ -193,10 +199,12 @@ class MyGameProfile(GameProfile):
     @property
     def terminal_events(self) -> list[str]:
         return ["game_over"]
-    # ... 其他属性
+    # ... 其他可选属性 (screen_regions, num_skills, state_classes)
 ```
 
-通用层（PPO、Transformer、训练管线、RewardShaper）完全不用改。
+新游戏**自动获得**通用动作空间（7 种触屏类型 + 5 个连续参数），策略网络通过 RL 学习在哪里触摸、如何滑动、持续多久。无需手写任何触控坐标映射。
+
+通用层（PPO、Transformer、训练管线、RewardShaper、TouchExecutor）完全不用改。
 
 ## 使用方法
 
@@ -318,7 +326,50 @@ entropy = dist.entropy().mean()
 total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
 ```
 
-### 2. YOLO 目标检测 + 结构化状态向量 (NEW)
+### 2. 通用动作空间 — 手机触屏原语 (NEW)
+
+原项目为每个游戏定义独立的动作空间（movements × actions + 硬编码触控坐标），扩展新游戏需要手写 100+ 行坐标映射，且无法表达动态操作（如瞄准需要滑动准星到敌人位置）。
+
+现代化版本用一组**手机触屏原语**替代所有 per-game 动作空间，所有游戏共享同一套动作：
+
+```
+7 种离散触屏类型:
+  TAP(0)         — 单击
+  LONG_PRESS(1)  — 长按
+  SWIPE(2)       — 快速滑动
+  DRAG(3)        — 拖拽
+  DOUBLE_TAP(4)  — 双击
+  KEY_EVENT(5)   — 硬件按键 (返回/菜单等)
+  WAIT(6)        — 等待 (BOS token)
+
+5 个连续参数 (归一化):
+  x∈[0,1]        — 触摸点 X 坐标 (归一化屏幕宽度)
+  y∈[0,1]        — 触摸点 Y 坐标 (归一化屏幕高度)
+  dx∈[-1,1]      — X 方向位移 (滑动/拖拽用)
+  dy∈[-1,1]      — Y 方向位移 (滑动/拖拽用)
+  duration∈[0,1] — 持续时间 (50ms~2000ms)
+```
+
+```python
+from gamerl.utils.actions import UniversalActionSpace, TouchType
+from gamerl.environment.device import TouchExecutor
+
+# TouchExecutor 在运行时将归一化参数转换为 ADB 命令
+executor = TouchExecutor(device, resolution=(2400, 1080))
+executor.execute(TouchType.TAP, [0.5, 0.8, 0.0, 0.0, 0.0])
+# → adb shell input tap 1200 864
+
+executor.execute(TouchType.SWIPE, [0.5, 0.5, 0.3, -0.2, 0.5])
+# → adb shell input swipe 1200 540 1560 324 1025
+```
+
+**关键设计**：
+- 策略网络通过 RL 自主学习**在哪里触摸、怎么滑动、持续多久**——不需要人工定义坐标
+- Profile 只负责定义**检测什么、奖励什么**，不再关心**怎么操作**
+- 向后兼容：通过 `action_mode` 属性支持 `"universal"`（默认）和 `"legacy"` 两种模式
+- 工厂方法：`TransformerPolicy.for_universal()`、`from_profile()`、`PPOAgent.from_profile()` 自动配置
+
+### 3. YOLO 目标检测 + 结构化状态向量 (NEW)
 
 原项目把整张图过 CNN 得到一个"黑盒"特征向量，模型只能从这个黑盒里学。现代化版本先用 YOLO 检测出结构化信息：
 
@@ -343,7 +394,7 @@ state_vector = state.to_vector()  # (state_dim,)
 
 模型决策更高效、更可解释、样本效率更高。支持 `ultralytics` YOLO 和 `MockDetector`（测试用）两种后端。
 
-### 3. 双循环调度器 (NEW)
+### 4. 双循环调度器 (NEW)
 
 分层决策架构，快循环做操作，慢循环做战略：
 
@@ -359,13 +410,13 @@ state_vector = state.to_vector()  # (state_dim,)
 ┌──────────────────────────────────┐
 │        FastLoop (30-100Hz)       │  ← 操作层
 │  截图 → YOLO检测 → 状态向量       │
-│  → PPO决策 → ADB触控执行          │
+│  → PPO决策 → TouchExecutor触控    │
 └──────────────────────────────────┘
 ```
 
 SlowLoop 不阻塞 FastLoop，通过 `StrategicDirective` 传递战略意图（如"优先推塔"会调整 FastLoop 的动作偏好）。
 
-### 4. 事件驱动的差异化奖励系统 (NEW)
+### 5. 事件驱动的差异化奖励系统 (NEW)
 
 原项目使用固定 7 字段的 `RewardConfig`（`kill_minion_or_tower`, `kill_hero`, `attacked_by_tower`...），这些字段只适用于 MOBA。扩展到和平精英和原神时，大量字段填 `0.0`，语义不匹配。
 
@@ -438,7 +489,7 @@ rewards:
     killed: -3.0        # 覆盖默认 -2.0
 ```
 
-### 5. TensorRT 部署加速 (NEW)
+### 6. TensorRT 部署加速 (NEW)
 
 部署链路：PyTorch (FP32, ~40ms) → ONNX (跨平台) → TensorRT (FP16 ~15ms / INT8 ~8ms)
 
@@ -451,7 +502,7 @@ builder = TRTEngineBuilder(precision="fp16")
 builder.build("policy.onnx", "policy.engine")
 ```
 
-### 6. RoPE 旋转位置编码
+### 7. RoPE 旋转位置编码
 
 原项目使用学习式位置 embedding，现代化版本使用 RoPE：
 
@@ -459,7 +510,7 @@ builder.build("policy.onnx", "policy.engine")
 - 相对位置编码，更适合序列建模
 - 无需额外参数
 
-### 7. Pre-LayerNorm Transformer
+### 8. Pre-LayerNorm Transformer
 
 原项目使用 Post-LN（先注意力/FFN 再归一化），现代化版本使用 Pre-LN：
 
@@ -468,7 +519,7 @@ builder.build("policy.onnx", "policy.engine")
 - 使用 PyTorch 原生 `nn.TransformerEncoder`
 - 注意：`norm_first=True` + 布尔掩码会导致 NaN，需转为 float mask (0/-inf)
 
-### 8. 跨平台截图 + ADB 触控
+### 9. 跨平台截图 + ADB 触控
 
 - **截图三后端**: mss (跨平台最快) / win32 (Windows 原生) / PyQt5 (scrcpy 窗口捕获)
 - **触控**: ADB shell input 替代 pyminitouch，全 Android 版本兼容
@@ -476,16 +527,17 @@ builder.build("policy.onnx", "policy.engine")
 ## 运行测试
 
 ```bash
-# 全部 126 个测试
+# 全部 186 个测试
 pytest tests/ -v
 
 # 仅运行特定模块
-pytest tests/test_vision.py -v      # 视觉检测
-pytest tests/test_runtime.py -v     # 运行时调度
-pytest tests/test_profiles.py -v    # 游戏 Profile (5 游戏)
-pytest tests/test_models.py -v      # 神经网络模型
-pytest tests/test_agent.py -v       # PPO Agent
-pytest tests/test_reward.py -v      # 奖励系统
+pytest tests/test_vision.py -v          # 视觉检测
+pytest tests/test_runtime.py -v         # 运行时调度
+pytest tests/test_profiles.py -v        # 游戏 Profile (5 游戏, 通用动作模式)
+pytest tests/test_hybrid_action.py -v   # 通用动作空间 + 策略/PPO 集成
+pytest tests/test_models.py -v          # 神经网络模型
+pytest tests/test_agent.py -v           # PPO Agent
+pytest tests/test_reward.py -v          # 奖励系统
 ```
 
 ## 查看训练日志
@@ -504,13 +556,14 @@ tensorboard --logdir runs/
 | 图像处理 | OpenCV (opencv-python) |
 | 序列模型 | nn.TransformerEncoder + RoPE |
 | 强化学习 | PPO + GAE |
+| 动作空间 | 通用手机触屏原语 (7 类型 + 5 连续参数) |
 | 奖励系统 | 事件驱动 RewardShaper (按游戏差异化) |
-| 设备控制 | ADB shell input |
+| 设备控制 | ADB shell input + TouchExecutor |
 | 屏幕捕获 | scrcpy + mss/win32/PyQt5 |
 | 部署加速 | ONNX + TensorRT (FP16/INT8) |
 | 配置管理 | YAML + dataclass |
 | 依赖管理 | pyproject.toml (PEP 621) |
-| 测试 | pytest (151 tests) |
+| 测试 | pytest (186 tests) |
 | 日志 | Python logging + TensorBoard |
 
 ## 致谢
