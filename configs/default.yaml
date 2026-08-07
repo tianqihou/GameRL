@@ -1,0 +1,179 @@
+# GameRL Configuration
+# ================================
+
+# Game profile selection
+# Available: "honor_of_kings" | "peacekeeper" | "genshin"
+# Aliases: "wzry", "hok", "王者荣耀", "和平精英", "原神"
+game:
+  name: "honor_of_kings"
+  # Override profile default resolution (set to null to use profile default)
+  resolution: null
+
+# Device settings
+device:
+  # Android device serial (from `adb devices`)
+  serial: ""
+  # Window title for screenshot capture (scrcpy window name)
+  window_title: "scrcpy"
+  # Screen capture method: "win32" | "mss" | "pyqt5"
+  capture_method: "mss"
+  # Target screenshot size (width, height)
+  screenshot_size: [960, 540]
+  # Screenshot crop box [left, top, right, bottom] (set to null for no crop)
+  crop_box: null
+
+# Model architecture
+model:
+  # Image backbone: "convnext_tiny" | "efficientnet_v2_s" | "resnet50" | "resnet101"
+  backbone: "convnext_tiny"
+  # Backbone output feature map size (sqrt of spatial dims)
+  backbone_grid_size: 6
+  # Transformer dimension
+  d_model: 768
+  # Number of transformer layers
+  n_layers: 12
+  # Number of attention heads
+  n_heads: 12
+  # Dropout rate
+  dropout: 0.0
+  # Maximum sequence length
+  max_seq_len: 300
+  # Use pretrained backbone weights
+  pretrained: true
+  # Use float16 for backbone inference (speed up)
+  backbone_half: true
+
+# PPO agent
+agent:
+  # Discount factor (gamma)
+  gamma: 0.999
+  # GAE lambda
+  gae_lambda: 0.95
+  # PPO clip ratio
+  clip_ratio: 0.2
+  # Learning rate
+  learning_rate: 0.00003
+  # PPO update epochs per batch
+  ppo_epochs: 10
+  # Entropy coefficient
+  entropy_coef: 0.01
+  # Value loss coefficient
+  value_coef: 0.5
+  # Max gradient norm for clipping
+  max_grad_norm: 0.5
+  # Batch size for PPO updates
+  batch_size: 64
+  # Mini-batch size for PPO updates
+  minibatch_size: 16
+
+# State judgment model (event classifier)
+state_model:
+  d_model: 768
+  n_layers: 2
+  n_heads: 12
+  dropout: 0.0
+  num_classes: 6
+  # Must match game profile's vocab_size (130 for HoK, 80 for Peacekeeper, 72 for Genshin)
+  vocab_size: 130
+
+# Reward shaping (overrides profile defaults)
+# Keys are game-specific event names defined by each GameProfile.
+# Common keys: "normal" (per-frame baseline), "other" (fallback).
+# Honor of Kings events: kill_minion, kill_tower, kill_hero, assist_kill,
+#   attacked_by_tower, killed, death, normal, other
+# Peacekeeper events: kill_enemy, down_enemy, got_killed, teammate_died,
+#   survived_frame, reached_final_circle, won_match, loot_item, normal, other
+# Genshin events: defeat_enemy, defeat_boss, character_downed, party_wiped,
+#   chest_opened, material_collected, quest_completed, exploration, normal, other
+rewards:
+  kill_minion: 2.0
+  kill_tower: 5.0
+  kill_hero: 5.0
+  assist_kill: 2.0
+  attacked_by_tower: -0.5
+  killed: -2.0
+  death: -1.0
+  normal: 0.01
+  other: -0.003
+
+# Training
+training:
+  # Number of training epochs
+  epochs: 100
+  # Chunk size for sequence processing
+  chunk_size: 600
+  # Stride for sliding window
+  stride: 600
+  # Use mixed precision training (AMP)
+  use_amp: true
+  # Save checkpoint every N epochs
+  save_every: 1
+  # Resume from checkpoint
+  resume: null
+  # TensorBoard log directory
+  log_dir: "runs"
+  # Model weights directory
+  weights_dir: "weights"
+
+# Data collection
+collection:
+  # Data save directory
+  save_dir: "../training_data"
+  # Number of frames before auto-learning
+  learn_every: 15000
+  # Target FPS for game interaction
+  target_fps: 5
+  # Auto-buy items every N frames
+  auto_buy_interval: 50
+
+# Paths
+paths:
+  # Action vocabulary mapping
+  action_vocab: "json/action_vocab.json"
+  # Action-to-touch-command mapping
+  action_commands: "json/action_commands.json"
+
+# Vision pipeline (YOLO detection + structured state)
+vision:
+  # Enable structured state extraction (vs raw CNN features)
+  enabled: true
+  # Detector backend: "yolo" (requires trained weights) | "mock" (for testing)
+  detector_backend: "mock"
+  # Path to YOLO weights (empty for mock detector)
+  model_path: ""
+  # Detection confidence threshold
+  conf_threshold: 0.25
+  # NMS IoU threshold
+  iou_threshold: 0.45
+  # Model input size [width, height]
+  input_size: [640, 640]
+  # Max objects to encode in state vector
+  max_enemies: 5
+  max_towers: 6
+  max_minions: 10
+
+# Runtime dual-loop scheduler
+runtime:
+  # Fast loop frequency (Hz) - tactical control (movement, skills)
+  fast_loop_hz: 30.0
+  # Slow loop frequency (Hz) - strategic decisions (push, farm, fight)
+  slow_loop_hz: 1.0
+  # Enable latency monitoring
+  enable_latency_monitor: true
+  # Alert if any pipeline stage exceeds this mean latency (ms)
+  latency_alert_threshold_ms: 50.0
+
+# Inference optimization
+inference:
+  # Backend: "pytorch" (default) | "onnx" (cross-platform) | "tensorrt" (NVIDIA GPU)
+  backend: "pytorch"
+  # ONNX model path (for onnx/tensorrt backends)
+  onnx_path: "weights/policy.onnx"
+  # TensorRT engine path
+  engine_path: "weights/policy.engine"
+  # Use FP16 precision (TensorRT only)
+  fp16: true
+  # Use INT8 precision (requires calibration data)
+  int8: false
+  # GPU device ID
+  device_id: 0

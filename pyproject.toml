@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gamerl"
+version = "2.0.0"
+description = "Multi-game RL framework — train AI to play mobile games with PPO + YOLO + Transformer"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+authors = [
+    {name = "FengQuanLi (original WZCQ)"},
+    {name = "GameRL Modernized"},
+]
+urls = {Homepage = "https://github.com/FengQuanLi/WZCQ"}
+keywords = ["reinforcement-learning", "ppo", "transformer", "game-ai", "yolo", "multi-game"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "PyYAML>=6.0",
+    "tensorboard>=2.14.0",
+    "tqdm>=4.65.0",
+    "adbutils>=2.0.0",
+]
+
+[project.optional-dependencies]
+windows = ["pywin32>=306", "PyQt5>=5.15.0"]
+capture = ["mss>=9.0.0", "opencv-python>=4.8.0"]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+]
+
+[project.scripts]
+gamerl-collect = "gamerl.scripts.collect_data:main"
+gamerl-train = "gamerl.scripts.train:main"
+gamerl-play = "gamerl.scripts.play:main"
+gamerl-preprocess = "gamerl.scripts.preprocess:main"
+
+[tool.setuptools.packages.find]
+include = ["gamerl*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
