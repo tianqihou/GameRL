@@ -62,6 +62,8 @@ class RolloutMemory:
         # Hybrid action data
         self.continuous_params: List[np.ndarray | None] = []
         self.continuous_log_probs: List[float] = []
+        # Structured game state (optional, from vision pipeline)
+        self.structured_states: List[np.ndarray | None] = []
 
         # Computed during GAE
         self.advantages: Optional[np.ndarray] = None
@@ -80,6 +82,7 @@ class RolloutMemory:
         done: bool,
         continuous_params: np.ndarray | None = None,
         continuous_log_prob: float = 0.0,
+        structured_state: np.ndarray | None = None,
     ) -> None:
         """Add a transition to the buffer."""
         if len(self.actions) >= self.max_size:
@@ -92,6 +95,7 @@ class RolloutMemory:
             self.dones.pop(0)
             self.continuous_params.pop(0)
             self.continuous_log_probs.pop(0)
+            self.structured_states.pop(0)
 
         self.image_features.append(image_features)
         self.actions.append(action)
@@ -101,6 +105,7 @@ class RolloutMemory:
         self.dones.append(done)
         self.continuous_params.append(continuous_params)
         self.continuous_log_probs.append(continuous_log_prob)
+        self.structured_states.append(structured_state)
 
     def compute_gae(
         self,
@@ -161,6 +166,7 @@ class RolloutMemory:
 
         # Check if hybrid data is present
         has_continuous = self.continuous_params and self.continuous_params[0] is not None
+        has_structured = self.structured_states and self.structured_states[0] is not None
 
         for start in range(0, n, batch_size):
             batch_idx = indices[start:start + batch_size]
@@ -184,6 +190,11 @@ class RolloutMemory:
                     [self.continuous_log_probs[i] for i in batch_idx]
                 )
 
+            if has_structured:
+                batch["structured_states"] = torch.FloatTensor(
+                    np.stack([self.structured_states[i] for i in batch_idx])
+                )
+
             yield batch
 
     def clear(self) -> None:
@@ -196,6 +207,7 @@ class RolloutMemory:
         self.dones.clear()
         self.continuous_params.clear()
         self.continuous_log_probs.clear()
+        self.structured_states.clear()
         self.advantages = None
         self.returns = None
 
@@ -213,6 +225,9 @@ class RolloutMemory:
         if self.continuous_params:
             data["continuous_params"] = np.array(self.continuous_params, dtype=object)
             data["continuous_log_probs"] = np.array(self.continuous_log_probs)
+        # Serialize structured states when present
+        if self.structured_states:
+            data["structured_states"] = np.array(self.structured_states, dtype=object)
         np.savez_compressed(path, **data)
 
     def load(self, path: str) -> None:
@@ -231,3 +246,8 @@ class RolloutMemory:
         else:
             self.continuous_params = [None] * len(self.actions)
             self.continuous_log_probs = [0.0] * len(self.actions)
+        # Restore structured states (may be absent in older saves)
+        if "structured_states" in data:
+            self.structured_states = list(data["structured_states"])
+        else:
+            self.structured_states = [None] * len(self.actions)

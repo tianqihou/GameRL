@@ -359,3 +359,252 @@ class TestPolicyTrainerConstruction:
 
         assert "和平精英" in trainer.profile.display_name
         assert trainer.policy.vocab_size == 7
+
+
+# ---------------------------------------------------------------------------
+# Structured state fusion (vision pipeline → policy input)
+# ---------------------------------------------------------------------------
+
+class TestStructuredStateFusion:
+    """StructuredState must flow from vision through to the policy."""
+
+    def test_policy_with_state_dim(self):
+        """Policy with state_dim>0 creates state_proj and fuses state."""
+        from gamerl.models.transformer import TransformerPolicy
+
+        state_dim = 65  # default StructuredState.vector_dim()
+        policy = TransformerPolicy.for_universal(
+            feature_dim=64, d_model=32, n_layers=1, n_heads=2,
+            max_seq_len=16, state_dim=state_dim,
+        )
+        assert policy.state_proj is not None
+        assert policy.state_dim == state_dim
+
+        # Forward with structured state
+        img = torch.randn(2, 8, 64)
+        acts = torch.randint(0, 7, (2, 8))
+        struct = torch.randn(2, 8, state_dim)
+        logits, values, cont = policy(img, acts, structured_state=struct)
+        assert logits.shape == (2, 8, 7)
+        assert cont.shape == (2, 8, 5)
+
+    def test_policy_without_state_dim_ignores_state(self):
+        """Policy with state_dim=0 silently ignores structured_state."""
+        from gamerl.models.transformer import TransformerPolicy
+
+        policy = TransformerPolicy.for_universal(
+            feature_dim=64, d_model=32, n_layers=1, n_heads=2, max_seq_len=16,
+        )
+        assert policy.state_proj is None
+
+        img = torch.randn(2, 8, 64)
+        acts = torch.randint(0, 7, (2, 8))
+        struct = torch.randn(2, 8, 65)
+        # Must not crash even if structured_state is passed
+        logits, values, cont = policy(img, acts, structured_state=struct)
+        assert logits.shape == (2, 8, 7)
+
+    def test_select_action_with_structured_state(self):
+        """PPOAgent.select_action accepts and forwards structured_state."""
+        from gamerl.agent.ppo import PPOAgent
+        from gamerl.config import AgentConfig
+        from gamerl.models.transformer import TransformerPolicy
+
+        state_dim = 65
+        policy = TransformerPolicy.for_universal(
+            feature_dim=64, d_model=32, n_layers=1, n_heads=2,
+            max_seq_len=16, state_dim=state_dim,
+        )
+        agent = PPOAgent(AgentConfig(batch_size=4), policy, backbone=None, device="cpu")
+
+        img = np.random.randn(5, 64).astype(np.float32)
+        hist = np.array([6, 0, 1, 2, 3], dtype=np.int64)
+        struct = np.random.randn(5, state_dim).astype(np.float32)
+
+        action, log_prob, value, cont, clp = agent.select_action(
+            img, hist, structured_state=struct,
+        )
+        assert 0 <= action < 7
+        assert cont is not None and cont.shape == (5,)
+
+    def test_memory_structured_state_roundtrip(self, tmp_path):
+        """RolloutMemory stores, batches, and serializes structured states."""
+        mem = RolloutMemory(max_size=100)
+        state_dim = 65
+        for i in range(6):
+            mem.add(
+                image_features=np.random.randn(64).astype(np.float32),
+                action=i % 7,
+                log_prob=-1.0,
+                value=0.5,
+                reward=1.0,
+                done=(i == 5),
+                structured_state=np.random.randn(state_dim).astype(np.float32),
+            )
+
+        mem.compute_gae(gamma=0.99, gae_lambda=0.95)
+        batches = list(mem.get_batches(batch_size=4))
+        assert "structured_states" in batches[0]
+        assert batches[0]["structured_states"].shape[-1] == state_dim
+
+        # Save/load roundtrip
+        path = str(tmp_path / "rollout.npz")
+        mem.save(path)
+        mem2 = RolloutMemory()
+        mem2.load(path)
+        assert mem2.structured_states[0] is not None
+        assert len(mem2.structured_states) == 6
+
+    def test_memory_without_structured_state(self, tmp_path):
+        """Memory without structured states must not include the key."""
+        mem = RolloutMemory(max_size=100)
+        for i in range(4):
+            mem.add(np.random.randn(32), i, -1.0, 0.0, 1.0, False)
+
+        mem.compute_gae(gamma=0.99, gae_lambda=0.95)
+        batches = list(mem.get_batches(batch_size=4))
+        assert "structured_states" not in batches[0]
+
+    def test_trainer_computes_state_dim(self):
+        """PolicyTrainer computes state_dim from vision config."""
+        from gamerl.config import Config
+
+        config = Config()
+        config.model.pretrained = False
+        config.model.d_model = 32
+        config.model.n_layers = 1
+        config.model.n_heads = 2
+        config.training.log_dir = os.devnull
+        # vision.enabled defaults to True → state_dim should be > 0
+        config.vision.enabled = True
+
+        from gamerl.training.trainer import PolicyTrainer
+        trainer = PolicyTrainer(config, device="cpu")
+
+        assert trainer.state_dim > 0
+        assert trainer.policy.state_dim == trainer.state_dim
+        assert trainer.policy.state_proj is not None
+
+    def test_trainer_vision_disabled_no_state(self):
+        """With vision.enabled=False, policy has no state fusion."""
+        from gamerl.config import Config
+
+        config = Config()
+        config.model.pretrained = False
+        config.model.d_model = 32
+        config.model.n_layers = 1
+        config.model.n_heads = 2
+        config.training.log_dir = os.devnull
+        config.vision.enabled = False
+
+        from gamerl.training.trainer import PolicyTrainer
+        trainer = PolicyTrainer(config, device="cpu")
+
+        assert trainer.state_dim == 0
+        assert trainer.policy.state_proj is None
+
+
+# ---------------------------------------------------------------------------
+# Config: imitation & strategic_rewards sections
+# ---------------------------------------------------------------------------
+
+class TestConfigSections:
+    """imitation and strategic_rewards YAML sections must be live."""
+
+    def test_imitation_config_loaded(self, tmp_path):
+        import yaml
+        from gamerl.config import Config
+
+        cfg = {
+            "imitation": {"enabled": True, "bc_epochs": 42,
+                          "dataset_path": "/tmp/demo"},
+        }
+        path = tmp_path / "test.yaml"
+        path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+        config = Config.from_yaml(path)
+        assert config.imitation.enabled is True
+        assert config.imitation.bc_epochs == 42
+        assert config.imitation.dataset_path == "/tmp/demo"
+
+    def test_strategic_rewards_loaded(self, tmp_path):
+        import yaml
+        from gamerl.config import Config
+
+        cfg = {
+            "strategic_rewards": {"objective_progress": 0.5,
+                                   "survival": 0.02, "exploration": 0.005},
+        }
+        path = tmp_path / "test.yaml"
+        path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+        config = Config.from_yaml(path)
+        assert config.strategic_rewards.objective_progress == 0.5
+        assert config.strategic_rewards.survival == 0.02
+
+    def test_reward_clip_from_config(self, tmp_path):
+        import yaml
+        from gamerl.config import Config
+
+        cfg = {"rewards": {"clip_min": -5.0, "clip_max": 5.0,
+                            "kill_hero": 8.0}}
+        path = tmp_path / "test.yaml"
+        path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+        config = Config.from_yaml(path)
+        assert config.rewards.clip_min == -5.0
+        assert config.rewards.clip_max == 5.0
+        assert config.rewards.events["kill_hero"] == 8.0
+
+
+# ---------------------------------------------------------------------------
+# RewardShaper: strategic rewards consumption
+# ---------------------------------------------------------------------------
+
+class TestStrategicRewards:
+    """RewardShaper must apply strategic reward components."""
+
+    def _make_shaper(self, strategic=None):
+        from gamerl.environment.reward import RewardShaper
+        return RewardShaper(
+            reward_events={"kill": 5.0, "normal": 0.01, "other": -0.003},
+            terminal_events=["death"],
+            strategic_rewards=strategic,
+        )
+
+    def test_survival_bonus(self):
+        from gamerl.config import StrategicRewardsConfig
+        sr = StrategicRewardsConfig(survival=0.02)
+        shaper = self._make_shaper(strategic=sr)
+
+        reward, done, _ = shaper.compute_reward(action=0)
+        # default event = "normal" (0.01) + survival (0.02)
+        assert reward == pytest.approx(0.03, abs=1e-6)
+
+    def test_objective_progress_bonus(self):
+        from gamerl.config import StrategicRewardsConfig
+        sr = StrategicRewardsConfig(objective_progress=0.5)
+        shaper = self._make_shaper(strategic=sr)
+
+        # Force a positive event via callback
+        shaper.event_callback = lambda p, c, a: "kill"
+        reward, _, _ = shaper.compute_reward(action=0)
+        # kill (5.0) + objective_progress (0.5)
+        assert reward == pytest.approx(5.5, abs=1e-6)
+
+    def test_no_strategic_rewards_unchanged(self):
+        """Without strategic config, behavior is identical to before."""
+        shaper = self._make_shaper(strategic=None)
+        reward, _, _ = shaper.compute_reward(action=0)
+        assert reward == pytest.approx(0.01, abs=1e-6)
+
+    def test_reward_clipping(self):
+        """Rewards must be clipped to the configured bounds."""
+        from gamerl.environment.reward import RewardShaper
+        shaper = RewardShaper(
+            reward_events={"jackpot": 999.0, "normal": 0.01},
+            clip_min=-5.0, clip_max=5.0,
+        )
+        shaper.event_callback = lambda p, c, a: "jackpot"
+        reward, _, _ = shaper.compute_reward(action=0)
+        assert reward == 5.0

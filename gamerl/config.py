@@ -250,12 +250,18 @@ class Config:
         def _build_rewards(section_data):
             """Build RewardConfig from YAML rewards section.
 
-            YAML format is a flat key-value map of event_name -> weight.
-            These override the profile's default reward_events.
+            YAML format is a flat key-value map of event_name -> weight,
+            plus optional reserved keys ``clip_min`` / ``clip_max`` for
+            reward clipping bounds (extracted separately, not events).
             """
             if section_data is None:
                 return RewardConfig()
-            return RewardConfig(events=dict(section_data))
+            section_data = dict(section_data)
+            clip_min = section_data.pop("clip_min", -10.0)
+            clip_max = section_data.pop("clip_max", 10.0)
+            return RewardConfig(
+                events=section_data, clip_min=clip_min, clip_max=clip_max,
+            )
 
         return cls(
             game=_build_section(GameConfig, data.get("game")),

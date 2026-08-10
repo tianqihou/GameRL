@@ -76,6 +76,17 @@ class PolicyTrainer:
 
         feature_dim = self.backbone.get_flat_dim()
 
+        # Compute structured-state dimension when the vision pipeline is enabled
+        self.state_dim = 0
+        if config.vision.enabled:
+            from ..vision.state_builder import StructuredState
+            self.state_dim = StructuredState.vector_dim(
+                max_enemies=config.vision.max_enemies,
+                max_towers=config.vision.max_towers,
+                max_minions=config.vision.max_minions,
+                num_skills=self.profile.num_skills,
+            )
+
         # Build PPO agent (policy auto-configured for the profile's action mode)
         self.agent = PPOAgent.from_profile(
             self.profile,
@@ -86,6 +97,7 @@ class PolicyTrainer:
             d_model=config.model.d_model,
             n_layers=config.model.n_layers,
             n_heads=config.model.n_heads,
+            state_dim=self.state_dim,
         )
         self.policy = self.agent.policy
 
@@ -338,11 +350,12 @@ class PolicyTrainer:
             episode_reward = 0.0
 
             for step in range(steps_per_episode):
-                # Select action (5-tuple)
+                # Select action (5-tuple), passing structured state when available
                 action, log_prob, value, cont_params, cont_log_prob = \
                     self.agent.select_action(
                         state.image_features,
                         state.action_history,
+                        structured_state=state.structured_state,
                     )
 
                 # Convert continuous params to dict for env.step
@@ -355,10 +368,15 @@ class PolicyTrainer:
 
                 # Take step
                 prev_features = state.image_features[-1]
+                prev_structured = (
+                    state.structured_state[-1]
+                    if state.structured_state is not None
+                    else None
+                )
                 state, reward, done, info = env.step(action, params_dict)
                 episode_reward += reward
 
-                # Store transition (with continuous params for hybrid PPO)
+                # Store transition (with continuous params + structured state)
                 self.agent.store_transition(
                     image_features=prev_features,
                     action=action,
@@ -368,6 +386,7 @@ class PolicyTrainer:
                     done=done,
                     continuous_params=cont_params,
                     continuous_log_prob=cont_log_prob,
+                    structured_state=prev_structured,
                 )
 
                 global_step += 1
@@ -377,9 +396,15 @@ class PolicyTrainer:
 
             # Compute last value for GAE
             with torch.no_grad():
+                last_structured = None
+                if state.structured_state is not None:
+                    last_structured = torch.FloatTensor(
+                        state.structured_state[-1:]
+                    ).unsqueeze(0).to(self.device)
                 _, last_value_t, _ = self.agent.policy(
                     torch.FloatTensor(state.image_features[-1:]).unsqueeze(0).to(self.device),
                     torch.LongTensor(state.action_history[-1:]).unsqueeze(0).to(self.device),
+                    structured_state=last_structured,
                 )
                 last_value = last_value_t.item()
 

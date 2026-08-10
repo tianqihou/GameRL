@@ -61,7 +61,36 @@ def main():
             target_size=tuple(config.device.screenshot_size),
             crop_box=config.device.crop_box,
         )
-        env = GameEnvironment(capture, device, trainer.backbone, profile=trainer.profile)
+
+        # Vision pipeline (structured state fused into the policy)
+        detector, state_builder = None, None
+        if config.vision.enabled:
+            from ..vision.detector import GameDetector, MockDetector
+            from ..vision.state_builder import GameStateBuilder
+
+            if config.vision.detector_backend == "yolo" and config.vision.model_path:
+                detector = GameDetector(
+                    model_path=config.vision.model_path,
+                    class_names=trainer.profile.detection_classes,
+                    conf_threshold=config.vision.conf_threshold,
+                    iou_threshold=config.vision.iou_threshold,
+                    input_size=tuple(config.vision.input_size),
+                )
+            else:
+                detector = MockDetector(class_names=trainer.profile.detection_classes)
+            state_builder = GameStateBuilder(
+                class_names=trainer.profile.detection_classes,
+                screen_resolution=trainer.profile.resolution,
+                max_enemies=config.vision.max_enemies,
+                max_towers=config.vision.max_towers,
+                max_minions=config.vision.max_minions,
+                num_skills=trainer.profile.num_skills,
+            )
+
+        env = GameEnvironment(
+            capture, device, trainer.backbone, profile=trainer.profile,
+            detector=detector, state_builder=state_builder,
+        )
 
         trainer.train_ppo(env=env, episodes=args.epochs or 100)
 

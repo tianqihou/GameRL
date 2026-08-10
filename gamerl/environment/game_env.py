@@ -32,6 +32,7 @@ class GameState:
     image_features: np.ndarray  # (seq_len, feature_dim)
     action_history: np.ndarray  # (seq_len,)
     raw_image: Optional[Image.Image] = None
+    structured_state: Optional[np.ndarray] = None  # (seq_len, state_dim) or None
 
 
 class GameEnvironment:
@@ -66,6 +67,12 @@ class GameEnvironment:
         reward_shaper: Optional RewardShaper for computing rewards and done flags.
         touch_executor: Optional TouchExecutor (universal mode).  If not
             provided but profile is universal, one is created from the profile.
+        detector: Optional vision detector (GameDetector / MockDetector).
+            When provided together with ``state_builder``, each frame is
+            converted to a structured state vector (HP, enemy positions,
+            skills, towers…) and included in ``GameState.structured_state``.
+        state_builder: Optional GameStateBuilder that converts detection
+            results to structured state vectors.
     """
 
     def __init__(
@@ -79,6 +86,8 @@ class GameEnvironment:
         max_history: int = 300,
         reward_shaper: Optional[RewardShaper] = None,
         touch_executor: TouchExecutor | None = None,
+        detector=None,
+        state_builder=None,
     ):
         self.capture = capture
         self.device = device
@@ -86,6 +95,8 @@ class GameEnvironment:
         self.profile = profile
         self.max_history = max_history
         self.reward_shaper = reward_shaper
+        self.detector = detector
+        self.state_builder = state_builder
 
         # Detect action mode
         self.is_universal = profile is not None and profile.is_universal
@@ -111,17 +122,35 @@ class GameEnvironment:
         # State history
         self._image_features: List[np.ndarray] = []
         self._action_history: List[int] = [self._bos_token]
+        self._structured_states: List[np.ndarray] = []
+
+    @property
+    def has_structured_state(self) -> bool:
+        """True when the vision pipeline (detector + state_builder) is active."""
+        return self.detector is not None and self.state_builder is not None
+
+    def _detect_structured_state(self, img: Image.Image) -> Optional[np.ndarray]:
+        """Run detection on a frame and build the structured state vector."""
+        if not self.has_structured_state:
+            return None
+        frame = np.array(img.convert("RGB"))
+        result = self.detector.detect(frame)
+        return self.state_builder.build_vector(result)
 
     def reset(self) -> GameState:
         """Reset the environment and return initial state."""
         self._image_features.clear()
         self._action_history = [self._bos_token]
+        self._structured_states.clear()
 
         # Capture initial frame
         img = self.capture.capture()
         features = self._extract_features(img)
 
         self._image_features.append(features)
+        structured = self._detect_structured_state(img)
+        if structured is not None:
+            self._structured_states.append(structured)
 
         return self._get_state(raw_image=img)
 
@@ -162,11 +191,16 @@ class GameEnvironment:
         # Update history
         self._image_features.append(features)
         self._action_history.append(action)
+        structured = self._detect_structured_state(img)
+        if structured is not None:
+            self._structured_states.append(structured)
 
         # Maintain sliding window
         if len(self._image_features) > self.max_history:
             self._image_features = self._image_features[-self.max_history:]
             self._action_history = self._action_history[-self.max_history:]
+            if self._structured_states:
+                self._structured_states = self._structured_states[-self.max_history:]
 
         state = self._get_state(raw_image=img)
 
@@ -267,10 +301,16 @@ class GameEnvironment:
         feature_dim = image_features.shape[-1] * image_features.shape[-2]
         image_features_flat = image_features.reshape(seq_len, -1)
 
+        # Structured state history (when vision pipeline is active)
+        structured_state = None
+        if self._structured_states:
+            structured_state = np.stack(self._structured_states)  # (seq_len, state_dim)
+
         return GameState(
             image_features=image_features_flat,
             action_history=action_history,
             raw_image=raw_image,
+            structured_state=structured_state,
         )
 
     def close(self) -> None:

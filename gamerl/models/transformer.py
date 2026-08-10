@@ -85,6 +85,7 @@ class TransformerPolicy(nn.Module):
 
     Architecture:
         Image features -> Linear projection -> + RoPE -> Transformer Decoder -> Heads
+        (optional) Structured state -> Linear projection -> fused with image features
 
     Args:
         feature_dim: Input dimension of image features (grid*grid * channels).
@@ -95,6 +96,10 @@ class TransformerPolicy(nn.Module):
         dropout: Dropout rate.
         max_seq_len: Maximum sequence length for RoPE.
         continuous_dim: Number of continuous action parameters (0 for pure discrete).
+        state_dim: Dimension of the structured state vector (0 = disabled).
+            When > 0, a ``state_proj`` layer fuses per-timestep structured
+            game state (HP, enemy positions, skills, towers…) into the
+            transformer input alongside image features.
     """
 
     def __init__(
@@ -107,6 +112,7 @@ class TransformerPolicy(nn.Module):
         dropout: float = 0.0,
         max_seq_len: int = 512,
         continuous_dim: int = 0,
+        state_dim: int = 0,
     ):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
@@ -114,9 +120,15 @@ class TransformerPolicy(nn.Module):
         self.d_model = d_model
         self.vocab_size = vocab_size
         self.continuous_dim = continuous_dim
+        self.state_dim = state_dim
 
         # Project image features to transformer dimension
         self.feature_proj = nn.Linear(feature_dim, d_model)
+
+        # Optional structured-state projection (YOLO → StructuredState vector)
+        self.state_proj: nn.Linear | None = None
+        if state_dim > 0:
+            self.state_proj = nn.Linear(state_dim, d_model)
 
         # Action embedding
         self.action_embed = nn.Embedding(vocab_size, d_model, padding_idx=-1)
@@ -181,6 +193,7 @@ class TransformerPolicy(nn.Module):
         action_seq: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
+        structured_state: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass through the policy-value network.
@@ -191,6 +204,9 @@ class TransformerPolicy(nn.Module):
             attn_mask: Causal attention mask, shape (seq_len, seq_len).
             key_padding_mask: Padding mask, shape (batch, seq_len).
                 True values are positions to MASK OUT (PyTorch convention).
+            structured_state: Optional structured game state vectors, shape
+                (batch, seq_len, state_dim).  Only used when the model was
+                built with ``state_dim > 0``.
 
         Returns:
             Tuple of (action_logits, state_values, continuous_mean):
@@ -202,6 +218,10 @@ class TransformerPolicy(nn.Module):
 
         # Project image features
         x = self.feature_proj(image_features)  # (B, S, d_model)
+
+        # Fuse structured game state (HP, positions, skills…) when available
+        if self.state_proj is not None and structured_state is not None:
+            x = x + self.state_proj(structured_state) * 0.1
 
         # Add action embedding (blended with image features)
         # Use action embedding as a bias, matching original design intent
@@ -250,6 +270,7 @@ class TransformerPolicy(nn.Module):
         action_seq: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,
+        structured_state: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Get policy and value for only the last timestep (for inference).
@@ -263,7 +284,10 @@ class TransformerPolicy(nn.Module):
             - value_last: (batch, 1)
             - continuous_mean_last: (batch, continuous_dim) or None
         """
-        logits, values, cont_mean = self.forward(image_features, action_seq, attn_mask, key_padding_mask)
+        logits, values, cont_mean = self.forward(
+            image_features, action_seq, attn_mask, key_padding_mask,
+            structured_state=structured_state,
+        )
         cont_last = cont_mean[:, -1, :] if cont_mean is not None else None
         return logits[:, -1, :], values[:, -1, :], cont_last
 
@@ -283,6 +307,7 @@ class TransformerPolicy(nn.Module):
         n_heads: int = 12,
         dropout: float = 0.0,
         max_seq_len: int = 512,
+        state_dim: int = 0,
     ) -> "TransformerPolicy":
         """Create a policy configured for the universal action space.
 
@@ -291,6 +316,10 @@ class TransformerPolicy(nn.Module):
         - 5 continuous parameters (x, y, dx, dy, duration)
 
         This is the recommended factory for new games.
+
+        Args:
+            state_dim: Set to StructuredState.vector_dim(...) to enable
+                structured-state fusion (0 = vision-only).
         """
         from ..utils.actions import UniversalActionSpace
         return cls(
@@ -302,6 +331,7 @@ class TransformerPolicy(nn.Module):
             dropout=dropout,
             max_seq_len=max_seq_len,
             continuous_dim=UniversalActionSpace.CONTINUOUS_DIM,
+            state_dim=state_dim,
         )
 
     @classmethod
@@ -314,6 +344,7 @@ class TransformerPolicy(nn.Module):
         n_heads: int = 12,
         dropout: float = 0.0,
         max_seq_len: int = 512,
+        state_dim: int = 0,
     ) -> "TransformerPolicy":
         """Create a policy configured for a specific GameProfile.
 
@@ -328,6 +359,7 @@ class TransformerPolicy(nn.Module):
                 n_heads=n_heads,
                 dropout=dropout,
                 max_seq_len=max_seq_len,
+                state_dim=state_dim,
             )
         return cls(
             feature_dim=feature_dim,
@@ -338,4 +370,5 @@ class TransformerPolicy(nn.Module):
             dropout=dropout,
             max_seq_len=max_seq_len,
             continuous_dim=profile.num_continuous_params,
+            state_dim=state_dim,
         )

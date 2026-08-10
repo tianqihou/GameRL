@@ -89,11 +89,16 @@ class PPOAgent:
         d_model: int = 768,
         n_layers: int = 12,
         n_heads: int = 12,
+        state_dim: int = 0,
     ) -> "PPOAgent":
         """Create a PPOAgent configured for a specific GameProfile.
 
         In universal mode: policy is created with vocab_size=7, continuous_dim=5.
         In legacy mode: policy is created with the profile's vocab_size and continuous params.
+
+        Args:
+            state_dim: Set to StructuredState.vector_dim(...) to enable
+                structured-state fusion in the policy (0 = vision-only).
         """
         if feature_dim == 0 and backbone is not None:
             feature_dim = backbone.feature_dim
@@ -103,6 +108,7 @@ class PPOAgent:
             d_model=d_model,
             n_layers=n_layers,
             n_heads=n_heads,
+            state_dim=state_dim,
         )
         return cls(config=config, policy=policy, backbone=backbone, device=device)
 
@@ -127,6 +133,7 @@ class PPOAgent:
         image_features: np.ndarray | torch.Tensor,
         action_history: np.ndarray,
         manual_action: Optional[int] = None,
+        structured_state: np.ndarray | torch.Tensor | None = None,
     ) -> Tuple[int, float, float, np.ndarray | None, float]:
         """
         Select an action using the current policy.
@@ -139,6 +146,9 @@ class PPOAgent:
             image_features: Image features for current sequence, shape (seq_len, feature_dim).
             action_history: History of past actions, shape (seq_len,).
             manual_action: If provided, use this action instead of sampling.
+            structured_state: Optional structured game state history, shape
+                (seq_len, state_dim).  Only used when the policy was built
+                with ``state_dim > 0``.
 
         Returns:
             Tuple of (action, log_prob, value, continuous_params, continuous_log_prob).
@@ -155,13 +165,23 @@ class PPOAgent:
         image_features = image_features.unsqueeze(0).to(self.device)  # (1, S, D)
         action_history = action_history.unsqueeze(0).to(self.device)  # (1, S)
 
+        # Optional structured state
+        state_tensor = None
+        if structured_state is not None and self.policy.state_dim > 0:
+            if isinstance(structured_state, np.ndarray):
+                structured_state = torch.FloatTensor(structured_state)
+            state_tensor = structured_state.unsqueeze(0).to(self.device)  # (1, S, state_dim)
+
         # Create causal mask
         seq_len = image_features.size(1)
         attn_mask = create_causal_mask(seq_len, self.device)  # (1, S, S) -> need (S, S)
         attn_mask = attn_mask.squeeze(0)  # (S, S)
 
         # Forward pass
-        logits, values, cont_mean = self.policy(image_features, action_history, attn_mask=attn_mask)
+        logits, values, cont_mean = self.policy(
+            image_features, action_history, attn_mask=attn_mask,
+            structured_state=state_tensor,
+        )
 
         # Get last step
         logits_last = logits[:, -1, :]  # (1, vocab_size)
@@ -207,12 +227,14 @@ class PPOAgent:
         done: bool,
         continuous_params: np.ndarray | None = None,
         continuous_log_prob: float = 0.0,
+        structured_state: np.ndarray | None = None,
     ) -> None:
         """Store a transition in the rollout memory."""
         self.memory.add(
             image_features, action, log_prob, value, reward, done,
             continuous_params=continuous_params,
             continuous_log_prob=continuous_log_prob,
+            structured_state=structured_state,
         )
 
     def update(self, last_value: float = 0.0) -> Dict[str, float]:
@@ -266,15 +288,22 @@ class PPOAgent:
                     cont_actions = batch["continuous_params"].to(self.device)
                     old_cont_log_probs = batch["old_continuous_log_probs"].to(self.device)
 
+                # Structured state (may be absent when vision pipeline is off)
+                struct_states = batch.get("structured_states")
+
                 batch_size = img_feats.size(0)
 
                 # Reshape for transformer: treat each transition independently (seq_len=1)
                 img_feats = img_feats.unsqueeze(1)  # (B, 1, D)
                 actions_input = actions.unsqueeze(1)  # (B, 1)
+                if struct_states is not None:
+                    struct_states = struct_states.to(self.device).unsqueeze(1)  # (B, 1, state_dim)
 
                 # Forward pass with AMP
                 with torch.amp.autocast("cuda", enabled=self.scaler.is_enabled()):
-                    logits, values, cont_mean = self.policy(img_feats, actions_input)
+                    logits, values, cont_mean = self.policy(
+                        img_feats, actions_input, structured_state=struct_states,
+                    )
                     logits_last = logits[:, -1, :]  # (B, vocab_size)
                     values_last = values[:, -1, 0]  # (B,)
 

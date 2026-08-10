@@ -23,6 +23,46 @@ from ..utils.actions import TouchType, UniversalActionSpace
 from ..utils.logging import setup_logger
 
 
+def _build_vision(config: Config, profile):
+    """Build the vision pipeline (detector + state builder) when enabled.
+
+    Returns (detector, state_builder, state_dim).  When the vision pipeline
+    is disabled, returns (None, None, 0).
+    """
+    if not config.vision.enabled:
+        return None, None, 0
+
+    from ..vision.detector import GameDetector, MockDetector
+    from ..vision.state_builder import GameStateBuilder, StructuredState
+
+    if config.vision.detector_backend == "yolo" and config.vision.model_path:
+        detector = GameDetector(
+            model_path=config.vision.model_path,
+            class_names=profile.detection_classes,
+            conf_threshold=config.vision.conf_threshold,
+            iou_threshold=config.vision.iou_threshold,
+            input_size=tuple(config.vision.input_size),
+        )
+    else:
+        detector = MockDetector(class_names=profile.detection_classes)
+
+    state_builder = GameStateBuilder(
+        class_names=profile.detection_classes,
+        screen_resolution=profile.resolution,
+        max_enemies=config.vision.max_enemies,
+        max_towers=config.vision.max_towers,
+        max_minions=config.vision.max_minions,
+        num_skills=profile.num_skills,
+    )
+    state_dim = StructuredState.vector_dim(
+        max_enemies=config.vision.max_enemies,
+        max_towers=config.vision.max_towers,
+        max_minions=config.vision.max_minions,
+        num_skills=profile.num_skills,
+    )
+    return detector, state_builder, state_dim
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run GameRL AI to play")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file path")
@@ -56,8 +96,15 @@ def main():
         freeze=True,
         use_half=config.model.backbone_half,
     )
+
+    # Vision pipeline (structured state for the policy)
+    detector, state_builder, state_dim = _build_vision(config, profile)
+
     # GameEnvironment auto-detects universal vs legacy mode from the profile
-    env = GameEnvironment(capture, device, backbone, profile=profile)
+    env = GameEnvironment(
+        capture, device, backbone, profile=profile,
+        detector=detector, state_builder=state_builder,
+    )
 
     # Build and load policy (auto-configured for the profile's action mode)
     feature_dim = backbone.get_flat_dim()
@@ -70,6 +117,7 @@ def main():
         d_model=config.model.d_model,
         n_layers=config.model.n_layers,
         n_heads=config.model.n_heads,
+        state_dim=state_dim,
     )
     agent.load(args.weights)
 
@@ -84,6 +132,7 @@ def main():
         action, log_prob, value, cont_params, _ = agent.select_action(
             state.image_features,
             state.action_history,
+            structured_state=state.structured_state,
         )
 
         # Convert continuous params array to dict for env.step
