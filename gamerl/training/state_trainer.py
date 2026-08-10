@@ -113,11 +113,17 @@ class StateModelTrainer:
 
         # Resolve state classes from the game profile
         from ..profiles import get_profile
+        profile = None
         try:
             profile = get_profile(config.game.name)
             self.state_classes = profile.state_classes
         except (ValueError, KeyError):
             self.state_classes = None  # Will use default in dataset
+
+        # vocab_size: config override > profile default (7 for universal)
+        vocab_size = config.state_model.vocab_size
+        if vocab_size is None:
+            vocab_size = profile.vocab_size if profile else 7
 
         self.model = StateJudgmentModel(
             feature_dim=feature_dim,
@@ -125,6 +131,7 @@ class StateModelTrainer:
             n_layers=config.state_model.n_layers,
             n_heads=config.state_model.n_heads,
             num_classes=len(self.state_classes) if self.state_classes else config.state_model.num_classes,
+            vocab_size=vocab_size,
             dropout=config.state_model.dropout,
         ).to(self.device)
 

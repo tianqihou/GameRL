@@ -2,8 +2,8 @@
 # ================================
 
 # Game profile selection
-# Available: "honor_of_kings" | "peacekeeper" | "genshin"
-# Aliases: "wzry", "hok", "王者荣耀", "和平精英", "原神"
+# Available: "honor_of_kings" | "peacekeeper" | "genshin" | "mini_world" | "roco_kingdom"
+# Aliases: "wzry", "hok", "王者荣耀", "和平精英", "原神", "迷你世界", "洛克王国"
 game:
   name: "honor_of_kings"
   # Override profile default resolution (set to null to use profile default)
@@ -73,8 +73,9 @@ state_model:
   n_heads: 12
   dropout: 0.0
   num_classes: 6
-  # Must match game profile's vocab_size (130 for HoK, 80 for Peacekeeper, 72 for Genshin)
-  vocab_size: 130
+  # Action embedding vocab size. Set to null for auto-detect from profile
+  # (7 for universal action space, per-game vocab for legacy mode)
+  vocab_size: null
 
 # Reward shaping (overrides profile defaults)
 # Keys are game-specific event names defined by each GameProfile.
@@ -126,11 +127,11 @@ collection:
   # Auto-buy items every N frames
   auto_buy_interval: 50
 
-# Paths
+# Paths (legacy mode only — universal action space does not use these)
 paths:
-  # Action vocabulary mapping
+  # Action vocabulary mapping (legacy per-game action space)
   action_vocab: "json/action_vocab.json"
-  # Action-to-touch-command mapping
+  # Action-to-touch-command mapping (legacy per-game action space)
   action_commands: "json/action_commands.json"
 
 # Vision pipeline (YOLO detection + structured state)

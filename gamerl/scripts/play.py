@@ -12,21 +12,19 @@ import argparse
 import logging
 import time
 
-import torch
-
+from ..agent.ppo import PPOAgent
 from ..config import Config
 from ..environment.capture import ScreenCapture
-from ..environment.device import ADBDevice, ActionMapper
+from ..environment.device import ADBDevice
 from ..environment.game_env import GameEnvironment
 from ..models.backbone import BackboneExtractor
-from ..models.transformer import TransformerPolicy
-from ..agent.ppo import PPOAgent
-from ..utils.actions import ActionSpace
+from ..profiles import get_profile
+from ..utils.actions import TouchType, UniversalActionSpace
 from ..utils.logging import setup_logger
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run WZCQ AI to play")
+    parser = argparse.ArgumentParser(description="Run GameRL AI to play")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file path")
     parser.add_argument("--weights", required=True, help="Policy weights path")
     parser.add_argument("--max-steps", type=int, default=100000, help="Max steps")
@@ -37,9 +35,13 @@ def main():
     logger = logging.getLogger("gamerl")
 
     config = Config.from_yaml(args.config)
+    profile = get_profile(config.game.name)
+    logger.info(
+        f"Game: {profile.display_name} "
+        f"(action_mode={profile.action_mode}, vocab={profile.vocab_size})"
+    )
 
     # Build components
-    action_space = ActionSpace()
     device = ADBDevice(serial=config.device.serial)
     capture = ScreenCapture(
         method=config.device.capture_method,
@@ -54,20 +56,21 @@ def main():
         freeze=True,
         use_half=config.model.backbone_half,
     )
-    action_mapper = ActionMapper(device.get_screen_resolution())
-    env = GameEnvironment(capture, device, backbone, action_space, action_mapper)
+    # GameEnvironment auto-detects universal vs legacy mode from the profile
+    env = GameEnvironment(capture, device, backbone, profile=profile)
 
-    # Build and load policy
+    # Build and load policy (auto-configured for the profile's action mode)
     feature_dim = backbone.get_flat_dim()
-    policy = TransformerPolicy(
+    agent = PPOAgent.from_profile(
+        profile,
+        config.agent,
+        backbone=None,
+        device="cuda",
         feature_dim=feature_dim,
         d_model=config.model.d_model,
         n_layers=config.model.n_layers,
         n_heads=config.model.n_heads,
-        vocab_size=action_space.vocab_size,
-        dropout=config.model.dropout,
     )
-    agent = PPOAgent(config.agent, policy, backbone=None, device="cuda")
     agent.load(args.weights)
 
     logger.info("Starting AI gameplay...")
@@ -77,24 +80,41 @@ def main():
     for step in range(args.max_steps):
         loop_start = time.time()
 
-        # Select action
-        action, log_prob, value = agent.select_action(
+        # Select action (5-tuple: action, log_prob, value, cont_params, cont_log_prob)
+        action, log_prob, value, cont_params, _ = agent.select_action(
             state.image_features,
             state.action_history,
         )
 
+        # Convert continuous params array to dict for env.step
+        params_dict = None
+        if cont_params is not None:
+            params_dict = {
+                name: float(cont_params[i])
+                for i, name in enumerate(profile.continuous_params)
+            }
+
         # Execute
-        state, reward, done, info = env.step(action)
+        state, reward, done, info = env.step(action, params_dict)
 
-        movement, action_type = action_space.decode(action)
-        logger.info(f"Step {step}: {movement.value}_{action_type.value} (value={value:.3f})")
+        if env.is_universal:
+            desc = UniversalActionSpace.describe(
+                action,
+                cont_params if cont_params is not None else UniversalActionSpace.neutral_params(),
+                profile.resolution,
+            )
+        else:
+            movement, action_type = env.action_space.decode(action)
+            desc = f"{movement}_{action_type}"
+        logger.info(f"Step {step}: {desc} (value={value:.3f})")
 
-        # Auto-buy items
-        if step > 0 and step % config.collection.auto_buy_interval == 0:
-            for skill_name in ["加三技能", "加二技能", "加一技能", "购买"]:
-                cmd = action_mapper.get_action_command(skill_name)
-                if cmd:
-                    device.send_touch_command(cmd)
+        # Auto-buy items (legacy HoK mode only — universal mode learns this via RL)
+        if not env.is_universal and env.action_mapper is not None:
+            if step > 0 and step % config.collection.auto_buy_interval == 0:
+                for skill_name in ["加三技能", "加二技能", "加一技能", "购买"]:
+                    cmd = env.action_mapper.get_action_command(skill_name)
+                    if cmd:
+                        device.send_touch_command(cmd)
 
         # Maintain FPS
         elapsed = time.time() - loop_start

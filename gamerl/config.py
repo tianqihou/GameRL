@@ -72,7 +72,9 @@ class StateModelConfig:
     n_heads: int = 12
     dropout: float = 0.0
     num_classes: int = 6
-    vocab_size: int = 130  # Must match game profile's vocab_size
+    # Vocabulary size for action embedding.  None = auto-detect from the
+    # game profile (7 for universal action space, per-game size for legacy).
+    vocab_size: Optional[int] = None
 
 
 @dataclass

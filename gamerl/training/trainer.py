@@ -8,20 +8,18 @@ Supports:
 - TensorBoard logging
 - Checkpoint resume
 - Supervised pretraining + PPO fine-tuning
+- Universal action space (discrete touch type + continuous params)
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.distributions import Categorical
 from torch.utils.data import DataLoader
 
 from ..agent.ppo import PPOAgent
@@ -29,8 +27,8 @@ from ..config import Config
 from ..data.dataset import GameSequenceDataset, collate_sequences
 from ..models.backbone import BackboneExtractor
 from ..models.state_judgment import StateJudgmentModel
-from ..models.transformer import TransformerPolicy
-from ..utils.actions import ActionSpace, BOS_TOKEN
+from ..profiles import get_profile
+from ..utils.actions import UniversalActionSpace
 from ..utils.logging import MetricsLogger
 from ..utils.masks import create_causal_mask
 
@@ -43,7 +41,11 @@ class PolicyTrainer:
 
     Supports two training modes:
     1. Supervised pretraining: Learn from human/AI demonstration data
+       (discrete cross-entropy + continuous MSE when continuous params exist)
     2. PPO fine-tuning: Reinforcement learning from game rewards
+
+    The action mode (universal / legacy) is auto-detected from the game
+    profile selected in ``config.game.name``.
 
     Args:
         config: Top-level configuration.
@@ -54,8 +56,14 @@ class PolicyTrainer:
         self.config = config
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-        # Build action space
-        self.action_space = ActionSpace()
+        # Resolve game profile (determines action mode, vocab size, BOS, etc.)
+        self.profile = get_profile(config.game.name)
+        logger.info(
+            f"Game profile: {self.profile.display_name} "
+            f"(action_mode={self.profile.action_mode}, "
+            f"vocab={self.profile.vocab_size}, "
+            f"continuous_params={self.profile.num_continuous_params})"
+        )
 
         # Build backbone (frozen, for feature extraction)
         self.backbone = BackboneExtractor(
@@ -68,24 +76,18 @@ class PolicyTrainer:
 
         feature_dim = self.backbone.get_flat_dim()
 
-        # Build policy network
-        self.policy = TransformerPolicy(
+        # Build PPO agent (policy auto-configured for the profile's action mode)
+        self.agent = PPOAgent.from_profile(
+            self.profile,
+            config=config.agent,
+            backbone=None,  # Backbone is used separately during data collection
+            device=self.device,
             feature_dim=feature_dim,
             d_model=config.model.d_model,
             n_layers=config.model.n_layers,
             n_heads=config.model.n_heads,
-            vocab_size=self.action_space.vocab_size,
-            dropout=config.model.dropout,
-            max_seq_len=config.model.max_seq_len,
-        ).to(self.device)
-
-        # Build PPO agent
-        self.agent = PPOAgent(
-            config=config.agent,
-            policy=self.policy,
-            backbone=None,  # Backbone is used separately during data collection
-            device=self.device,
         )
+        self.policy = self.agent.policy
 
         # Metrics logger
         self.metrics = MetricsLogger(config.training.log_dir)
@@ -100,12 +102,19 @@ class PolicyTrainer:
     def load_state_model(self, weights_path: str) -> None:
         """Load the state judgment model for reward computation."""
         feature_dim = self.backbone.get_flat_dim()
+
+        # vocab_size: config override > profile default (7 for universal)
+        vocab_size = self.config.state_model.vocab_size
+        if vocab_size is None:
+            vocab_size = self.profile.vocab_size
+
         self.state_model = StateJudgmentModel(
             feature_dim=feature_dim,
             d_model=self.config.state_model.d_model,
             n_layers=self.config.state_model.n_layers,
             n_heads=self.config.state_model.n_heads,
             num_classes=self.config.state_model.num_classes,
+            vocab_size=vocab_size,
             dropout=self.config.state_model.dropout,
         ).to(self.device)
 
@@ -126,7 +135,9 @@ class PolicyTrainer:
         Supervised pretraining from demonstration data.
 
         Trains the policy to predict the next action given the current
-        state history, using cross-entropy loss.
+        state history.  Uses cross-entropy for the discrete touch type
+        and MSE for continuous params (when the data contains them and
+        the policy has a continuous head).
 
         Args:
             data_dir: Directory containing preprocessed .npz files.
@@ -149,6 +160,8 @@ class PolicyTrainer:
             pin_memory=True,
         )
 
+        has_continuous_head = self.policy.continuous_head is not None
+
         # AMP scaler
         scaler = torch.amp.GradScaler("cuda",
             enabled=self.config.training.use_amp and self.device.type == "cuda"
@@ -160,6 +173,8 @@ class PolicyTrainer:
 
         for epoch in range(epochs):
             epoch_loss = 0.0
+            epoch_discrete_loss = 0.0
+            epoch_cont_loss = 0.0
             n_batches = 0
 
             for batch in dataloader:
@@ -168,6 +183,11 @@ class PolicyTrainer:
                 targets = batch["target_actions"].to(self.device)
                 padding_mask = batch["padding_mask"].to(self.device)
 
+                # Continuous targets (universal mode data only)
+                cont_targets = batch.get("target_continuous_params")
+                if cont_targets is not None:
+                    cont_targets = cont_targets.to(self.device)
+
                 batch_size, seq_len, _ = image_features.shape
 
                 # Create causal mask
@@ -175,18 +195,35 @@ class PolicyTrainer:
 
                 # Forward pass with AMP
                 with torch.amp.autocast("cuda", scaler.is_enabled()):
-                    logits, values = self.policy(
+                    logits, values, cont_mean = self.policy(
                         image_features, actions,
                         attn_mask=attn_mask,
                         key_padding_mask=padding_mask,
                     )
 
-                    # Cross-entropy loss (ignore padding positions)
-                    loss = F.cross_entropy(
+                    # Discrete cross-entropy loss (ignore padding positions)
+                    discrete_loss = F.cross_entropy(
                         logits.reshape(-1, logits.size(-1)),
                         targets.reshape(-1),
                         ignore_index=-1,
                     )
+                    loss = discrete_loss
+
+                    # Continuous param regression (MSE on non-padding positions)
+                    cont_loss = None
+                    if (
+                        has_continuous_head
+                        and cont_mean is not None
+                        and cont_targets is not None
+                    ):
+                        # valid mask: True where NOT padding
+                        valid = ~padding_mask  # (B, S)
+                        if valid.any():
+                            cont_loss = F.mse_loss(
+                                cont_mean[valid],      # (N, continuous_dim)
+                                cont_targets[valid],   # (N, continuous_dim)
+                            )
+                            loss = loss + cont_loss
 
                 # Backward pass
                 optimizer.zero_grad()
@@ -199,15 +236,31 @@ class PolicyTrainer:
                 scaler.update()
 
                 epoch_loss += loss.item()
+                epoch_discrete_loss += discrete_loss.item()
+                if cont_loss is not None:
+                    epoch_cont_loss += cont_loss.item()
                 n_batches += 1
                 global_step += 1
 
                 # Log metrics
                 if global_step % 10 == 0:
                     self.metrics.log_scalar("supervised/loss", loss.item(), global_step)
+                    self.metrics.log_scalar(
+                        "supervised/discrete_loss", discrete_loss.item(), global_step
+                    )
+                    if cont_loss is not None:
+                        self.metrics.log_scalar(
+                            "supervised/continuous_loss", cont_loss.item(), global_step
+                        )
 
-            avg_loss = epoch_loss / max(n_batches, 1)
-            logger.info(f"Epoch {epoch + 1}/{epochs}: loss={avg_loss:.4f}")
+            n = max(n_batches, 1)
+            logger.info(
+                f"Epoch {epoch + 1}/{epochs}: "
+                f"loss={epoch_loss / n:.4f} "
+                f"(discrete={epoch_discrete_loss / n:.4f}"
+                + (f", continuous={epoch_cont_loss / n:.4f}" if epoch_cont_loss > 0 else "")
+                + ")"
+            )
 
             # Save checkpoint
             if (epoch + 1) % self.config.training.save_every == 0:
@@ -251,24 +304,36 @@ class PolicyTrainer:
             episode_reward = 0.0
 
             for step in range(steps_per_episode):
-                # Select action
-                action, log_prob, value = self.agent.select_action(
-                    state.image_features,
-                    state.action_history,
-                )
+                # Select action (5-tuple)
+                action, log_prob, value, cont_params, cont_log_prob = \
+                    self.agent.select_action(
+                        state.image_features,
+                        state.action_history,
+                    )
+
+                # Convert continuous params to dict for env.step
+                params_dict = None
+                if cont_params is not None:
+                    params_dict = {
+                        name: float(cont_params[i])
+                        for i, name in enumerate(self.profile.continuous_params)
+                    }
 
                 # Take step
-                state, reward, done, info = env.step(action)
+                prev_features = state.image_features[-1]
+                state, reward, done, info = env.step(action, params_dict)
                 episode_reward += reward
 
-                # Store transition
+                # Store transition (with continuous params for hybrid PPO)
                 self.agent.store_transition(
-                    image_features=state.image_features[-1],
+                    image_features=prev_features,
                     action=action,
                     log_prob=log_prob,
                     value=value,
                     reward=reward,
                     done=done,
+                    continuous_params=cont_params,
+                    continuous_log_prob=cont_log_prob,
                 )
 
                 global_step += 1
@@ -278,11 +343,11 @@ class PolicyTrainer:
 
             # Compute last value for GAE
             with torch.no_grad():
-                _, last_value = self.agent.policy(
+                _, last_value_t, _ = self.agent.policy(
                     torch.FloatTensor(state.image_features[-1:]).unsqueeze(0).to(self.device),
                     torch.LongTensor(state.action_history[-1:]).unsqueeze(0).to(self.device),
                 )
-                last_value = last_value.item()
+                last_value = last_value_t.item()
 
             # PPO update
             metrics = self.agent.update(last_value=last_value)

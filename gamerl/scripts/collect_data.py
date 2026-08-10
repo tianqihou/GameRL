@@ -11,22 +11,20 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 
+from ..agent.ppo import PPOAgent
 from ..config import Config
 from ..data.collector import DataCollector
 from ..environment.capture import ScreenCapture
-from ..environment.device import ADBDevice, ActionMapper
+from ..environment.device import ADBDevice
 from ..environment.game_env import GameEnvironment
 from ..models.backbone import BackboneExtractor
-from ..models.transformer import TransformerPolicy
-from ..agent.ppo import PPOAgent
-from ..utils.actions import ActionSpace
+from ..profiles import get_profile
 from ..utils.logging import setup_logger
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Collect WZCQ training data")
+    parser = argparse.ArgumentParser(description="Collect GameRL training data")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file path")
     parser.add_argument("--manual", action="store_true", help="Manual (human) control mode")
     parser.add_argument("--max-steps", type=int, default=10000, help="Max steps per episode")
@@ -38,9 +36,13 @@ def main():
     logger = logging.getLogger("gamerl")
 
     config = Config.from_yaml(args.config)
+    profile = get_profile(config.game.name)
+    logger.info(
+        f"Game: {profile.display_name} "
+        f"(action_mode={profile.action_mode}, vocab={profile.vocab_size})"
+    )
 
     # Build components
-    action_space = ActionSpace()
     device = ADBDevice(serial=config.device.serial)
     capture = ScreenCapture(
         method=config.device.capture_method,
@@ -55,27 +57,27 @@ def main():
         freeze=True,
         use_half=config.model.backbone_half,
     )
-    action_mapper = ActionMapper(device.get_screen_resolution())
 
-    env = GameEnvironment(capture, device, backbone, action_space, action_mapper)
+    # GameEnvironment auto-detects universal vs legacy mode from the profile
+    env = GameEnvironment(capture, device, backbone, profile=profile)
 
     # Build agent (optional, for AI-driven collection)
     agent = None
     if not args.manual and args.weights:
-        import torch
         feature_dim = backbone.get_flat_dim()
-        policy = TransformerPolicy(
+        agent = PPOAgent.from_profile(
+            profile,
+            config.agent,
+            backbone=None,
+            device="cuda",
             feature_dim=feature_dim,
             d_model=config.model.d_model,
             n_layers=config.model.n_layers,
             n_heads=config.model.n_heads,
-            vocab_size=action_space.vocab_size,
-            dropout=config.model.dropout,
         )
-        agent = PPOAgent(config.agent, policy, backbone=None, device="cuda")
         agent.load(args.weights)
 
-    collector = DataCollector(env, agent, action_space, config.collection.save_dir)
+    collector = DataCollector(env, agent, config.collection.save_dir)
 
     for ep in range(args.episodes):
         logger.info(f"=== Episode {ep + 1}/{args.episodes} ===")

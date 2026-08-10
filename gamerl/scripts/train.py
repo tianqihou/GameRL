@@ -21,7 +21,7 @@ from ..utils.logging import setup_logger
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train WZCQ policy network")
+    parser = argparse.ArgumentParser(description="Train GameRL policy network")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file path")
     parser.add_argument("--mode", choices=["supervised", "ppo"], required=True,
                         help="Training mode")
@@ -47,14 +47,12 @@ def main():
         if args.state_model:
             trainer.load_state_model(args.state_model)
 
-        # For PPO, we need a live environment
-        # Build environment
+        # For PPO, we need a live environment.
+        # GameEnvironment auto-detects universal vs legacy mode from the profile.
         from ..environment.capture import ScreenCapture
-        from ..environment.device import ADBDevice, ActionMapper
+        from ..environment.device import ADBDevice
         from ..environment.game_env import GameEnvironment
-        from ..utils.actions import ActionSpace
 
-        action_space = ActionSpace()
         device = ADBDevice(serial=config.device.serial)
         capture = ScreenCapture(
             method=config.device.capture_method,
@@ -62,8 +60,7 @@ def main():
             target_size=tuple(config.device.screenshot_size),
             crop_box=config.device.crop_box,
         )
-        action_mapper = ActionMapper(device.get_screen_resolution())
-        env = GameEnvironment(capture, device, trainer.backbone, action_space, action_mapper)
+        env = GameEnvironment(capture, device, trainer.backbone, profile=trainer.profile)
 
         trainer.train_ppo(env=env, episodes=args.epochs or 100)
 

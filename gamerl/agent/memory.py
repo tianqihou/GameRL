@@ -207,6 +207,10 @@ class RolloutMemory:
             "rewards": np.array(self.rewards),
             "dones": np.array(self.dones),
         }
+        # Serialize continuous params when present (object array preserves None)
+        if self.continuous_params:
+            data["continuous_params"] = np.array(self.continuous_params, dtype=object)
+            data["continuous_log_probs"] = np.array(self.continuous_log_probs)
         np.savez_compressed(path, **data)
 
     def load(self, path: str) -> None:
@@ -218,3 +222,10 @@ class RolloutMemory:
         self.values = list(data["values"])
         self.rewards = list(data["rewards"])
         self.dones = list(data["dones"])
+        # Restore continuous params (may be absent in older saves)
+        if "continuous_params" in data:
+            self.continuous_params = list(data["continuous_params"])
+            self.continuous_log_probs = list(data["continuous_log_probs"])
+        else:
+            self.continuous_params = [None] * len(self.actions)
+            self.continuous_log_probs = [0.0] * len(self.actions)

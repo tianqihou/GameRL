@@ -38,6 +38,7 @@ def export_to_onnx(
     action_shape: Tuple[int, ...] = (1, 300),
     config: Optional[ExportConfig] = None,
     device: str = "cpu",
+    vocab_size: Optional[int] = None,
 ) -> Path:
     """
     Export a PyTorch model to ONNX format.
@@ -49,12 +50,21 @@ def export_to_onnx(
         action_shape: Shape of the action sequence input (batch, seq_len).
         config: Export configuration. Uses defaults if None.
         device: Device to run export on.
+        vocab_size: Vocabulary size for dummy action tokens.  If None,
+            inferred from ``model.action_embed.num_embeddings``.
 
     Returns:
         Path to the saved ONNX file.
     """
     if config is None:
         config = ExportConfig()
+
+    # Infer vocab size from the model's embedding layer if not given
+    if vocab_size is None:
+        if hasattr(model, "action_embed") and hasattr(model.action_embed, "num_embeddings"):
+            vocab_size = model.action_embed.num_embeddings
+        else:
+            vocab_size = 7  # Universal action space default
 
     model = model.to(device)
     model.eval()
@@ -64,7 +74,7 @@ def export_to_onnx(
 
     # Create dummy inputs
     dummy_features = torch.randn(*input_shape, device=device)
-    dummy_actions = torch.randint(0, 130, action_shape, device=device)
+    dummy_actions = torch.randint(0, vocab_size, action_shape, device=device)
 
     # Set dynamic axes if configured
     dynamic_axes = None
@@ -178,6 +188,7 @@ def export_yolo_to_onnx(
 def verify_onnx(
     onnx_path: str | Path,
     test_inputs: Optional[Tuple[torch.Tensor, ...]] = None,
+    vocab_size: Optional[int] = None,
 ) -> bool:
     """
     Verify an ONNX model by comparing outputs with PyTorch.
@@ -185,6 +196,7 @@ def verify_onnx(
     Args:
         onnx_path: Path to the ONNX file.
         test_inputs: Optional test inputs. Uses random if None.
+        vocab_size: Vocabulary size for random test actions (default 7).
 
     Returns:
         True if outputs match within tolerance.
@@ -209,9 +221,10 @@ def verify_onnx(
 
     # Generate test inputs if not provided
     if test_inputs is None:
+        vs = vocab_size or 7
         test_inputs = (
             torch.randn(1, 10, 768),
-            torch.randint(0, 130, (1, 10)),
+            torch.randint(0, vs, (1, 10)),
         )
 
     # Run inference

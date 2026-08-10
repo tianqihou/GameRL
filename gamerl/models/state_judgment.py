@@ -45,7 +45,7 @@ class StateJudgmentModel(nn.Module):
         n_layers: int = 2,
         n_heads: int = 12,
         num_classes: int = 6,
-        vocab_size: int = 130,
+        vocab_size: int = 7,
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -128,7 +128,12 @@ class StateJudgmentModel(nn.Module):
             image_features = image_features.unsqueeze(1)
 
         batch_size = image_features.size(0)
-        action_seq = torch.ones(batch_size, 1, dtype=torch.long, device=image_features.device)
+        # Use BOS token (WAIT=6 in universal mode) as neutral action placeholder
+        from ..utils.actions import UniversalActionSpace
+        bos = min(UniversalActionSpace.BOS_TOKEN, self.action_embed.num_embeddings - 1)
+        action_seq = torch.full(
+            (batch_size, 1), bos, dtype=torch.long, device=image_features.device
+        )
 
         logits = self.forward(image_features, action_seq)
         return logits.squeeze(1)  # (batch, num_classes)

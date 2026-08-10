@@ -8,6 +8,7 @@ Replaces 处理训练数据5.py from the original project, with:
 - Batch processing (instead of one image at a time)
 - Memory-efficient feature storage
 - Configurable backbone
+- Universal action space support (continuous params preserved)
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -23,7 +24,7 @@ from PIL import Image
 from tqdm import tqdm
 
 from ..models.backbone import BackboneExtractor
-from ..utils.actions import ActionSpace, BOS_TOKEN
+from ..utils.actions import BOS_TOKEN, UniversalActionSpace
 
 logger = logging.getLogger("gamerl.data")
 
@@ -35,25 +36,51 @@ class DataPreprocessor:
     Takes raw screenshots + action JSONL and produces .npz files
     containing pre-extracted backbone features and action sequences.
 
+    Handles both record formats:
+    - **Universal**: ``touch_type`` + ``continuous_params`` per record
+      (continuous sequence is saved as ``continuous_params`` in the npz).
+    - **Legacy**: ``action_token`` per record (discrete only).
+
     Args:
         backbone: Image feature extraction backbone.
-        action_space: Action space for encoding actions.
+        bos_token: Beginning-of-sequence token.  Defaults to the
+            universal BOS (WAIT=6); pass ``BOS_TOKEN`` (128) explicitly
+            when preprocessing legacy per-game data.
         batch_size: Batch size for image processing.
+        device: Device for feature extraction.
     """
 
     def __init__(
         self,
         backbone: BackboneExtractor,
-        action_space: ActionSpace,
+        bos_token: int = UniversalActionSpace.BOS_TOKEN,
         batch_size: int = 32,
         device: str = "cuda",
     ):
         self.backbone = backbone
-        self.action_space = action_space
+        self.bos_token = bos_token
         self.batch_size = batch_size
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-    def process_episode(self, episode_dir: str | Path) -> Tuple[np.ndarray, np.ndarray]:
+    @classmethod
+    def from_profile(
+        cls,
+        backbone: BackboneExtractor,
+        profile,
+        batch_size: int = 32,
+        device: str = "cuda",
+    ) -> "DataPreprocessor":
+        """Create a preprocessor configured for a game profile's action mode."""
+        return cls(
+            backbone=backbone,
+            bos_token=profile.bos_token,
+            batch_size=batch_size,
+            device=device,
+        )
+
+    def process_episode(
+        self, episode_dir: str | Path
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """
         Process a single episode directory.
 
@@ -61,16 +88,20 @@ class DataPreprocessor:
             episode_dir: Directory containing .jpg screenshots and actions.jsonl.
 
         Returns:
-            Tuple of (image_features, action_sequence):
+            Tuple of (image_features, action_sequence, continuous_sequence):
             - image_features: (seq_len, feature_dim) float32 array
-            - action_sequence: (seq_len,) int64 array
+            - action_sequence: (seq_len + 1,) int64 array (BOS prepended)
+            - continuous_sequence: (seq_len + 1, 5) float32 array, or None
+              when the records contain no continuous params (legacy data)
         """
         episode_dir = Path(episode_dir)
         actions_path = episode_dir / "actions.jsonl"
 
+        empty = (np.array([]), np.array([]), None)
+
         if not actions_path.exists():
             logger.warning(f"No actions.jsonl in {episode_dir}")
-            return np.array([]), np.array([])
+            return empty
 
         # Load action records
         records = []
@@ -79,12 +110,27 @@ class DataPreprocessor:
                 records.append(json.loads(line))
 
         if not records:
-            return np.array([]), np.array([])
+            return empty
 
-        # Build action sequence (prepend BOS token)
-        action_seq = [BOS_TOKEN]
+        # Build action sequence (prepend BOS token).
+        # Universal records carry "touch_type"; legacy records carry "action_token".
+        action_seq = [self.bos_token]
         for rec in records:
-            action_seq.append(rec["action_token"])
+            if "touch_type" in rec:
+                action_seq.append(int(rec["touch_type"]))
+            else:
+                action_seq.append(int(rec["action_token"]))
+
+        # Build continuous param sequence when present (universal mode).
+        # BOS row gets neutral params (screen center, no movement).
+        has_continuous = any("continuous_params" in rec for rec in records)
+        continuous_seq: Optional[np.ndarray] = None
+        if has_continuous:
+            neutral = UniversalActionSpace.neutral_params().tolist()
+            rows = [neutral]
+            for rec in records:
+                rows.append(rec.get("continuous_params", neutral))
+            continuous_seq = np.array(rows, dtype=np.float32)
 
         # Extract features in batches
         all_features = []
@@ -113,7 +159,7 @@ class DataPreprocessor:
         image_features = np.concatenate(all_features, axis=0)  # (seq_len, feature_dim)
         action_sequence = np.array(action_seq, dtype=np.int64)
 
-        return image_features, action_sequence
+        return image_features, action_sequence, continuous_seq
 
     def process_and_save(self, episode_dir: str | Path) -> Path:
         """
@@ -128,21 +174,25 @@ class DataPreprocessor:
         episode_dir = Path(episode_dir)
         output_path = episode_dir / "preprocessed.npz"
 
-        image_features, action_sequence = self.process_episode(episode_dir)
+        image_features, action_sequence, continuous_seq = self.process_episode(episode_dir)
 
         if len(image_features) == 0:
             logger.warning(f"No data to save for {episode_dir}")
             return output_path
 
-        np.savez_compressed(
-            output_path,
-            image_features=image_features,
-            action_sequence=action_sequence,
-        )
+        arrays = {
+            "image_features": image_features,
+            "action_sequence": action_sequence,
+        }
+        if continuous_seq is not None:
+            arrays["continuous_params"] = continuous_seq
+
+        np.savez_compressed(output_path, **arrays)
 
         logger.info(
             f"Saved preprocessed data: {output_path} "
-            f"({image_features.shape[0]} frames, {image_features.shape[1]} dims)"
+            f"({image_features.shape[0]} frames, {image_features.shape[1]} dims"
+            f"{', +continuous' if continuous_seq is not None else ''})"
         )
 
         return output_path
