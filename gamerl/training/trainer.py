@@ -128,22 +128,36 @@ class PolicyTrainer:
 
     def train_supervised(
         self,
-        data_dir: str,
+        data_dir: Optional[str] = None,
         epochs: Optional[int] = None,
     ) -> None:
         """
-        Supervised pretraining from demonstration data.
+        Supervised pretraining from demonstration data (behavior cloning).
 
         Trains the policy to predict the next action given the current
         state history.  Uses cross-entropy for the discrete touch type
         and MSE for continuous params (when the data contains them and
         the policy has a continuous head).
 
+        When ``data_dir`` / ``epochs`` are omitted, falls back to the
+        ``imitation`` config section (``dataset_path`` / ``bc_epochs``).
+
         Args:
             data_dir: Directory containing preprocessed .npz files.
             epochs: Number of training epochs (overrides config).
         """
-        epochs = epochs or self.config.training.epochs
+        if data_dir is None:
+            data_dir = self.config.imitation.dataset_path
+        if epochs is None:
+            epochs = (
+                self.config.imitation.bc_epochs
+                if self.config.imitation.enabled
+                else self.config.training.epochs
+            )
+        logger.info(
+            f"BC pretraining: data={data_dir}, epochs={epochs} "
+            f"(imitation.enabled={self.config.imitation.enabled})"
+        )
 
         dataset = GameSequenceDataset(
             data_dir=data_dir,
@@ -293,6 +307,26 @@ class PolicyTrainer:
         if env is None:
             logger.warning("No environment provided. Skipping PPO training.")
             return
+
+        # Attach a RewardShaper if the env doesn't have one — without it
+        # PPO would train on reward=0.0 forever.
+        if getattr(env, "reward_shaper", None) is None:
+            from ..environment.reward import RewardShaper
+            env.reward_shaper = RewardShaper.from_profile(
+                self.profile,
+                state_model=self.state_model,
+                clip_min=self.config.rewards.clip_min,
+                clip_max=self.config.rewards.clip_max,
+                strategic_rewards=self.config.strategic_rewards,
+            )
+            # Apply YAML reward overrides on top of profile defaults
+            if self.config.rewards.events:
+                env.reward_shaper.reward_events.update(self.config.rewards.events)
+            logger.info(
+                "Attached RewardShaper to env "
+                f"(clip=[{self.config.rewards.clip_min}, {self.config.rewards.clip_max}], "
+                f"state_model={'yes' if self.state_model else 'no'})"
+            )
 
         global_step = 0
 

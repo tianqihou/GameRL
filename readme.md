@@ -577,3 +577,9 @@ tensorboard --logdir runs/
 ## License
 
 MIT License (见 [LICENSE](LICENSE))
+
+
+## Improvements in this fork
+- PPO rollout buffer increased for long-horizon games.
+- Reward clipping added for PPO stability.
+- Config prepared for behavior cloning + PPO fine tuning workflow.

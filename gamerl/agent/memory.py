@@ -43,12 +43,14 @@ class RolloutMemory:
     this uses dynamic lists and only converts to tensors when needed.
     """
 
-    def __init__(self, max_size: int = 2000):
+    def __init__(self, max_size: int = 32768):
         """
         Initialize the rollout memory.
 
         Args:
             max_size: Maximum number of transitions to store.
+
+            PPO benefits from longer rollouts in sparse-reward games; default is increased to 32768.
         """
         self.max_size = max_size
         self.image_features: List[np.ndarray] = []

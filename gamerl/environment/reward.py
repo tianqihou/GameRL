@@ -56,6 +56,9 @@ class RewardShaper:
         state_model=None,
         event_callback=None,
         default_event: str = "normal",
+        clip_min: float = -10.0,
+        clip_max: float = 10.0,
+        strategic_rewards=None,
     ):
         self.reward_events = reward_events
         self.state_classes = state_classes or list(reward_events.keys())
@@ -63,6 +66,9 @@ class RewardShaper:
         self.state_model = state_model
         self.event_callback = event_callback
         self.default_event = default_event
+        self.reward_clip = (clip_min, clip_max)
+        # Optional StrategicRewardsConfig (long-horizon reward components)
+        self.strategic_rewards = strategic_rewards
 
         # Build event → index mapping for state_model output
         self._event_to_idx = {name: i for i, name in enumerate(self.state_classes)}
@@ -115,7 +121,26 @@ class RewardShaper:
                 if key == event or key in event:
                     reward += weight
 
-        # Step 4: Check terminal
+        # Step 3b: Long-horizon strategic reward components (if configured)
+        if self.strategic_rewards is not None:
+            sr = self.strategic_rewards
+            # Survival bonus: per-frame reward for staying alive
+            if getattr(sr, "survival", 0.0) and event not in self.terminal_events:
+                reward += sr.survival
+            # Objective progress: bonus when a positive game event occurs
+            if getattr(sr, "objective_progress", 0.0):
+                base = self.reward_events.get(event, 0.0)
+                if base > self.reward_events.get("normal", 0.0):
+                    reward += sr.objective_progress
+            # Exploration bonus: small reward for non-idle actions
+            if getattr(sr, "exploration", 0.0):
+                if event not in ("normal", "other"):
+                    reward += sr.exploration
+
+        # Step 4: Stabilize training. Extreme reward spikes make PPO unstable.
+        reward = float(np.clip(reward, self.reward_clip[0], self.reward_clip[1]))
+
+        # Step 5: Check terminal
         done = event in self.terminal_events
 
         # Update stats
@@ -212,7 +237,15 @@ class RewardShaper:
         }
 
     @classmethod
-    def from_profile(cls, profile, state_model=None, event_callback=None) -> "RewardShaper":
+    def from_profile(
+        cls,
+        profile,
+        state_model=None,
+        event_callback=None,
+        clip_min: float = -10.0,
+        clip_max: float = 10.0,
+        strategic_rewards=None,
+    ) -> "RewardShaper":
         """
         Create a RewardShaper from a GameProfile.
 
@@ -220,6 +253,10 @@ class RewardShaper:
             profile: A GameProfile instance with reward_events defined.
             state_model: Optional StateJudgmentModel.
             event_callback: Optional custom event classification callback.
+            clip_min: Reward clipping lower bound (PPO stability).
+            clip_max: Reward clipping upper bound (PPO stability).
+            strategic_rewards: Optional StrategicRewardsConfig with
+                long-horizon reward components (survival, objective, exploration).
 
         Returns:
             Configured RewardShaper instance.
@@ -233,4 +270,7 @@ class RewardShaper:
             default_event=profile.reward_events.get("normal", 0.0)
             and "normal"
             or "normal",
+            clip_min=clip_min,
+            clip_max=clip_max,
+            strategic_rewards=strategic_rewards,
         )

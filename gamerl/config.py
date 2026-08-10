@@ -97,6 +97,11 @@ class RewardConfig:
         "other": -0.003,
     })
 
+    # Reward clipping bounds (min, max) for PPO stability.
+    # Extreme reward spikes destabilize the value function.
+    clip_min: float = -10.0
+    clip_max: float = 10.0
+
     def get(self, event: str, default: float = 0.0) -> float:
         """Get reward weight for an event."""
         return self.events.get(event, default)
@@ -176,6 +181,40 @@ class InferenceConfig:
 
 
 @dataclass
+class ImitationConfig:
+    """Behavior cloning (imitation learning) configuration.
+
+    The recommended training workflow is:
+    1. Collect human demonstrations (collect_data --manual)
+    2. Behavior cloning pretraining (train --mode supervised)
+    3. PPO fine-tuning (train --mode ppo)
+    """
+
+    enabled: bool = True
+    # Number of BC pretraining epochs before PPO
+    bc_epochs: int = 20
+    # Directory containing demonstration data
+    dataset_path: str = "data/demonstrations"
+
+
+@dataclass
+class StrategicRewardsConfig:
+    """Long-horizon reward components layered on top of event rewards.
+
+    These weights are added to the event-driven reward when the state
+    pipeline can supply the corresponding signals.  All default to 0.0
+    (disabled) so existing behavior is unchanged unless configured.
+    """
+
+    # Progress toward strategic objectives (tower damage, objective control)
+    objective_progress: float = 0.0
+    # Per-frame survival bonus (encourages staying alive)
+    survival: float = 0.0
+    # Exploration bonus for visiting new screen regions
+    exploration: float = 0.0
+
+
+@dataclass
 class Config:
     """Top-level configuration container."""
 
@@ -191,6 +230,8 @@ class Config:
     vision: VisionConfig = field(default_factory=VisionConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
+    imitation: ImitationConfig = field(default_factory=ImitationConfig)
+    strategic_rewards: StrategicRewardsConfig = field(default_factory=StrategicRewardsConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Config:
@@ -229,6 +270,10 @@ class Config:
             vision=_build_section(VisionConfig, data.get("vision")),
             runtime=_build_section(RuntimeConfig, data.get("runtime")),
             inference=_build_section(InferenceConfig, data.get("inference")),
+            imitation=_build_section(ImitationConfig, data.get("imitation")),
+            strategic_rewards=_build_section(
+                StrategicRewardsConfig, data.get("strategic_rewards")
+            ),
         )
 
     def to_yaml(self, path: str | Path) -> None:

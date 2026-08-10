@@ -25,7 +25,8 @@ def main():
     parser.add_argument("--config", default="configs/default.yaml", help="Config file path")
     parser.add_argument("--mode", choices=["supervised", "ppo"], required=True,
                         help="Training mode")
-    parser.add_argument("--data", default="../training_data", help="Training data directory")
+    parser.add_argument("--data", default=None,
+                        help="Training data directory (default: imitation.dataset_path from config)")
     parser.add_argument("--weights", default=None, help="Weights to resume/load")
     parser.add_argument("--state-model", default=None, help="State model weights for PPO rewards")
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")

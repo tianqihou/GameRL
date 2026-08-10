@@ -37,7 +37,7 @@ model:
   # Dropout rate
   dropout: 0.0
   # Maximum sequence length
-  max_seq_len: 300
+  max_seq_len: 512
   # Use pretrained backbone weights
   pretrained: true
   # Use float16 for backbone inference (speed up)
@@ -56,13 +56,13 @@ agent:
   # PPO update epochs per batch
   ppo_epochs: 10
   # Entropy coefficient
-  entropy_coef: 0.01
+  entropy_coef: 0.02
   # Value loss coefficient
   value_coef: 0.5
   # Max gradient norm for clipping
   max_grad_norm: 0.5
   # Batch size for PPO updates
-  batch_size: 64
+  batch_size: 128
   # Mini-batch size for PPO updates
   minibatch_size: 16
 
@@ -178,3 +178,17 @@ inference:
   int8: false
   # GPU device ID
   device_id: 0
+
+# Improved training strategy
+# Prefer demonstration pretraining before PPO fine-tuning.
+imitation:
+  enabled: true
+  bc_epochs: 20
+  dataset_path: "data/demonstrations"
+
+# Long-horizon reward components. Values are added only when the event detector
+# can provide reliable game-state signals.
+strategic_rewards:
+  objective_progress: 0.5
+  survival: 0.02
+  exploration: 0.005
